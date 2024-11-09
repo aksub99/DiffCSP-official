@@ -11,8 +11,49 @@ import numpy as np
 
 from diffcsp.common.utils import PROJECT_ROOT
 from diffcsp.common.data_utils import (
-    preprocess, preprocess_tensors, add_scaled_lattice_prop)
+    preprocess, preprocess_tensors, preprocess_pdbs, add_scaled_lattice_prop)
 
+class DatasetPDBFiles(Dataset):
+    def __init__(self, name: ValueNode, folder_path: ValueNode, preprocess_workers: ValueNode, lattice_scale_method: ValueNode, save_path: ValueNode, **kwargs):
+        super().__init__()
+        self.folder_path = folder_path
+        self.preprocess_pdbs(save_path, preprocess_workers, **kwargs)
+        add_scaled_lattice_prop(self.cached_data, lattice_scale_method)
+
+    def preprocess_pdbs(self, save_path, preprocess_workers, **kwargs):
+        if os.path.exists(save_path):
+            self.cached_data = torch.load(save_path)
+        else:
+            cached_data = preprocess_pdbs(self.folder_path, preprocess_workers, smiles=kwargs['smiles'], num_mols=kwargs['num_mols'])
+            torch.save(cached_data, save_path)
+        self.cached_data = cached_data
+
+    def __len__(self) -> int:
+        return len(self.cached_data)
+
+    def __getitem__(self, index):
+        data_dict = self.cached_data[index]
+
+        (frac_coords, atom_types, lengths, angles, num_atoms, atom_features, edge_index, edge_attr) = data_dict['graph_arrays']
+
+        # atom_coords are fractional coordinates
+        # edge_index is incremented during batching
+        # https://pytorch-geometric.readthedocs.io/en/latest/notes/batching.html
+        data = Data(
+            frac_coords=torch.Tensor(frac_coords),
+            atom_types=torch.LongTensor(atom_types),
+            lengths=torch.Tensor(lengths).view(1, -1),
+            angles=torch.Tensor(angles).view(1, -1),
+            num_atoms=num_atoms,
+            num_nodes=num_atoms,  # special attribute used for batching in pytorch geometric
+            atom_features=torch.Tensor(atom_features),
+            edge_index=torch.LongTensor(edge_index),
+            edge_attr=torch.Tensor(edge_attr),
+        )
+        return data
+
+    def __repr__(self) -> str:
+        return f"DatasetPDBFiles({self.path=})"
 
 class CrystDataset(Dataset):
     def __init__(self, name: ValueNode, path: ValueNode,
@@ -151,20 +192,22 @@ class TensorCrystDataset(Dataset):
         return f"TensorCrystDataset(len: {len(self.cached_data)})"
 
 
-
-@hydra.main(config_path=str(PROJECT_ROOT / "conf"), config_name="default", version_base="1.1")
+@hydra.main(config_path=str("/home/gridsan/sakshay/experiments/flowmm/scripts_model/conf"), config_name="default")
 def main(cfg: omegaconf.DictConfig):
     from torch_geometric.data import Batch
     from diffcsp.common.data_utils import get_scaler_from_data_list
-    dataset: CrystDataset = hydra.utils.instantiate(
+    dataset: DatasetPDBFiles = hydra.utils.instantiate(
         cfg.data.datamodule.datasets.train, _recursive_=False
     )
-    lattice_scaler = get_scaler_from_data_list(
-        dataset.cached_data,
-        key='scaled_lattice')
-    scaler = get_scaler_from_data_list(
-        dataset.cached_data,
-        key=dataset.prop)
+    # dataset: CrystDataset = hydra.utils.instantiate(
+    #     cfg.data.datamodule.datasets.train, _recursive_=False
+    # )
+    # lattice_scaler = get_scaler_from_data_list(
+    #     dataset.cached_data,
+    #     key='scaled_lattice')
+    # scaler = get_scaler_from_data_list(
+    #     dataset.cached_data,
+    #     key=dataset.prop)
 
     dataset.lattice_scaler = lattice_scaler
     dataset.scaler = scaler

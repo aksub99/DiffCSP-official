@@ -3,7 +3,11 @@ import pandas as pd
 import networkx as nx
 import torch
 import copy
+import os
 import itertools
+
+from rdkit import Chem
+from rdkit.Chem import AllChem
 
 from pymatgen.core.structure import Structure
 from pymatgen.core.lattice import Lattice
@@ -95,9 +99,221 @@ chemical_symbols = [
     'Lv', 'Ts', 'Og']
 
 
+
+bond_features_list = {
+    "bond_type": ["SINGLE", "DOUBLE", "TRIPLE", "AROMATIC", "misc"],
+    "bond_stereo": [
+        "STEREONONE",
+        "STEREOZ",
+        "STEREOE",
+        "STEREOCIS",
+        "STEREOTRANS",
+        "STEREOANY",
+    ],
+    "is_conjugated": [False, True],
+}
+
+atom_features_list = {
+    "atomic_num": list(range(1, 75)) + ["misc"],  # stop at tungsten
+    "chirality": [
+        "CHI_UNSPECIFIED",
+        "CHI_TETRAHEDRAL_CW",
+        "CHI_TETRAHEDRAL_CCW",
+        "CHI_OTHER",
+    ],
+    "degree": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, "misc"],
+    "numring": [0, 1, 2, 3, 4, 5, 6, "misc"],
+    "numring": [0, 1, 2, "misc"],
+    "implicit_valence": [0, 1, 2, 3, 4, 5, 6, "misc"],
+    "formal_charge": [-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, "misc"],
+    "numH": [0, 1, 2, 3, 4, 5, 6, 7, 8, "misc"],
+    "numH": [0, 1, 2, 3, 4, "misc"],
+    "number_radical_e": [0, 1, 2, 3, 4, "misc"],
+    "hybridization": ["SP", "SP2", "SP3", "SP3D", "SP3D2", "misc"],
+    "is_aromatic": [False, True],
+    "is_in_ring3": [False, True],
+    "is_in_ring4": [False, True],
+    "is_in_ring5": [False, True],
+    "is_in_ring6": [False, True],
+    "is_in_ring7": [False, True],
+    "is_in_ring8": [False, True],
+}
+
+
 CrystalNN = local_env.CrystalNN(
     distance_cutoffs=None, x_diff_weight=-1, porous_adjustment=False)
 
+class PDBParser:
+    def __init__(self, filepath):
+        self.filepath = filepath
+        self.atom_coords = []
+        self.atom_types = []
+        self.bond_connectivity = []
+        self.lattice = None
+        self._parse_pdb()
+
+    def _parse_pdb(self):
+        with open(self.filepath, 'r') as file:
+            for line in file:
+                if line.startswith("ATOM") or line.startswith("HETATM"):
+                    atom_type = line[13:14].strip()  # Atom type
+                    x = float(line[30:38].strip())  # X coordinate
+                    y = float(line[38:46].strip())  # Y coordinate
+                    z = float(line[46:54].strip())  # Z coordinate
+                    
+                    self.atom_coords.append((x, y, z))
+                    self.atom_types.append(atom_type)
+                
+                elif line.startswith("CONECT"):
+                    indices = [int(idx) - 1 for idx in line.split()[1:]]  # Adjust for zero-indexing
+                    if len(indices) > 1:
+                        atom_index = indices[0]
+                        for bonded_index in indices[1:]:
+                            self.bond_connectivity.append((atom_index, bonded_index))
+                
+                elif line.startswith("CRYST1"):
+                    # Extract lattice parameters and angles from CRYST1 record
+                    a = float(line[6:15].strip())
+                    b = float(line[15:24].strip())
+                    c = float(line[24:33].strip())
+                    alpha = float(line[33:40].strip())
+                    beta = float(line[40:47].strip())
+                    gamma = float(line[47:54].strip())
+                    self.lattice = {
+                        "a": a,
+                        "b": b,
+                        "c": c,
+                        "alpha": alpha,
+                        "beta": beta,
+                        "gamma": gamma
+                    }
+
+    def get_atom_coordinates(self):
+        """Return coordinates of all atoms."""
+        return self.atom_coords
+
+    def get_atom_types(self):
+        """Return atom types of all atoms."""
+        return self.atom_types
+
+    def get_bond_connectivity(self):
+        """Return bond connectivity as list of index pairs."""
+        return self.bond_connectivity
+
+    def get_lattice(self):
+        """Return lattice parameters and angles if present."""
+        return self.lattice
+
+def build_crystal_from_pdb(pdb_filepath):
+    parser = PDBParser(pdb_filepath)
+    atom_coords = parser.get_atom_coordinates()
+    atom_types = parser.get_atom_types()
+    bond_connectivity = parser.get_bond_connectivity()
+    lattice = parser.get_lattice()
+
+    lattice_params = [lattice["a"], lattice["b"], lattice["c"], lattice["alpha"], lattice["beta"], lattice["gamma"]]
+
+    crystal = Structure(
+        lattice=Lattice.from_parameters(*lattice_params),
+        species=atom_types,
+        coords=atom_coords,
+        coords_are_cartesian=True,
+    )
+    return crystal
+
+CrystalNN = local_env.CrystalNN(
+    distance_cutoffs=None, x_diff_weight=-1, porous_adjustment=False)
+
+
+def make_rdkit_mol(cart_coords, atom_types, pdb_filepath, smiles):
+    raw_mol = Chem.MolFromPDBFile(pdb_filepath)
+    mol = Chem.Mol(raw_mol)
+
+    template = Chem.MolFromSmiles(smiles)
+    mol = AllChem.AssignBondOrdersFromTemplate(template, mol)
+    AllChem.AssignStereochemistryFrom3D(mol)
+    return mol
+
+
+def featurize_atoms(mol):
+    atom_features = []
+    ringinfo = mol.GetRingInfo()
+
+    def safe_index_(key, val):
+        return safe_index(atom_features_list[key], val)
+
+    for idx, atom in enumerate(mol.GetAtoms()):
+        features = [
+            safe_index_("atomic_num", atom.GetAtomicNum()),
+            safe_index_("chirality", str(atom.GetChiralTag())),
+            safe_index_("degree", atom.GetTotalDegree()),
+            safe_index_("numring", ringinfo.NumAtomRings(idx)),
+            safe_index_("implicit_valence", atom.GetImplicitValence()),
+            safe_index_("formal_charge", atom.GetFormalCharge()),
+            safe_index_("numH", atom.GetTotalNumHs()),
+            safe_index_("hybridization", str(atom.GetHybridization())),
+            safe_index_("is_aromatic", atom.GetIsAromatic()),
+            safe_index_("is_in_ring5", ringinfo.IsAtomInRingOfSize(idx, 5)),
+            safe_index_("is_in_ring6", ringinfo.IsAtomInRingOfSize(idx, 6)),
+        ]
+        atom_features.append(features)
+
+    return torch.tensor(atom_features)
+
+def safe_index(l, e):
+    """Return index of element e in list l. If e is not present, return the last index"""
+    try:
+        return l.index(e)
+    except:
+        return len(l) - 1
+
+
+def featurize_bond(bond):
+    bond_feature = [
+        safe_index(bond_features_list["bond_type"], str(bond.GetBondType())),
+        safe_index(bond_features_list["bond_stereo"], str(bond.GetStereo())),
+        safe_index(bond_features_list["is_conjugated"], bond.GetIsConjugated()),
+    ]
+    return bond_feature
+
+def get_bond_edges(mol):
+    row, col, edge_attr = [], [], []
+    for bond in mol.GetBonds():
+        start, end = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
+        row += [start, end]
+        col += [end, start]
+        edge_attr += [featurize_bond(bond)]
+
+    edge_index = torch.tensor([row, col], dtype=torch.long)
+    edge_attr = torch.tensor(edge_attr)
+    edge_attr = torch.concat([edge_attr, edge_attr], 0)
+    return edge_index, edge_attr.type(torch.uint8)
+
+
+def build_bonded_crystal_graph(crystal, pdb_filepath, smiles, num_mols):
+    frac_coords = crystal.frac_coords
+    cart_coords = crystal.cart_coords
+    atom_types = crystal.atomic_numbers
+    lattice_parameters = crystal.lattice.parameters
+    lengths = lattice_parameters[:3]
+    angles = lattice_parameters[3:]
+    
+    atom_types = np.array(atom_types)
+    lengths, angles = np.array(lengths), np.array(angles)
+    num_atoms = atom_types.shape[0]
+
+    smiles = ".".join([smiles] * num_mols)
+    mol = make_rdkit_mol(cart_coords, atom_types, pdb_filepath, smiles)
+
+    atom_features = featurize_atoms(mol)
+    # We only get bonded edges here. We will get cutoff-based edges in cspnet
+    edge_index, edge_attr = get_bond_edges(mol)
+    edge_index = np.array(edge_index)
+
+    assert np.allclose(crystal.lattice.matrix,
+                          lattice_params_to_matrix(*lengths, *angles))
+
+    return frac_coords, atom_types, lengths, angles, num_atoms, atom_features, edge_index, edge_attr
 
 def build_crystal(crystal_str, niggli=True, primitive=False):
     """Build crystal from cif string."""
@@ -1156,6 +1372,28 @@ def get_scaler_from_data_list(data_list, key):
     scaler = StandardScalerTorch()
     scaler.fit(targets)
     return scaler
+
+def process_one_pdb(file_path, **kwargs):
+    crystal = build_crystal_from_pdb(file_path)
+
+    graph_arrays = build_bonded_crystal_graph(crystal, pdb_filepath=file_path, smiles=kwargs['smiles'], num_mols=kwargs['num_mols'])
+    result_dict = {
+        'frame_id': int(file_path.split('.')[0][-1]),
+        'file_path': file_path,
+        'graph_arrays': graph_arrays,
+    }
+    return result_dict
+
+def preprocess_pdbs(input_folder, num_workers, **kwargs):
+    process_func = partial(process_one_pdb, **kwargs)
+    unordered_results = p_umap(
+        process_func,
+        [os.path.join(input_folder, file) for file in os.listdir(input_folder)],
+        num_cpus=num_workers)
+
+    frameid_to_results = {result['frame_id']: result for result in unordered_results}
+    ordered_results = [frameid_to_results[int(file.split('.')[0][-1])] for file in os.listdir(input_folder)]
+    return ordered_results
 
 
 def process_one(row, niggli, primitive, graph_method, prop_list, use_space_group = False, tol=0.01):
