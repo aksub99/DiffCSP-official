@@ -1478,7 +1478,7 @@ def add_scaled_lattice_prop(data_list, lattice_scale_method):
         # the indexes are brittle if more objects are returned
         lengths = graph_arrays[2]
         angles = graph_arrays[3]
-        num_atoms = graph_arrays[-1]
+        num_atoms = graph_arrays[4] # this is -1 in original implementation (we have different order in PDB version)
         assert lengths.shape[0] == angles.shape[0] == 3
         assert isinstance(num_atoms, int)
 

@@ -26,7 +26,7 @@ class DatasetPDBFiles(Dataset):
         else:
             cached_data = preprocess_pdbs(self.folder_path, preprocess_workers, smiles=kwargs['smiles'], num_mols=kwargs['num_mols'])
             torch.save(cached_data, save_path)
-        self.cached_data = cached_data
+            self.cached_data = cached_data
 
     def __len__(self) -> int:
         return len(self.cached_data)
