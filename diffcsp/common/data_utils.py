@@ -225,13 +225,15 @@ CrystalNN = local_env.CrystalNN(
     distance_cutoffs=None, x_diff_weight=-1, porous_adjustment=False)
 
 
-def make_rdkit_mol(cart_coords, atom_types, pdb_filepath, smiles):
+def make_rdkit_mol(cart_coords, atom_types, pdb_filepath, smiles, removeHs=True):
     raw_mol = Chem.MolFromPDBFile(pdb_filepath)
     mol = Chem.Mol(raw_mol)
 
     template = Chem.MolFromSmiles(smiles)
     mol = AllChem.AssignBondOrdersFromTemplate(template, mol)
     AllChem.AssignStereochemistryFrom3D(mol)
+    if removeHs:
+        mol = Chem.RemoveHs(mol)
     return mol
 
 
@@ -245,16 +247,16 @@ def featurize_atoms(mol):
     for idx, atom in enumerate(mol.GetAtoms()):
         features = [
             safe_index_("atomic_num", atom.GetAtomicNum()),
-            safe_index_("chirality", str(atom.GetChiralTag())),
-            safe_index_("degree", atom.GetTotalDegree()),
-            safe_index_("numring", ringinfo.NumAtomRings(idx)),
-            safe_index_("implicit_valence", atom.GetImplicitValence()),
-            safe_index_("formal_charge", atom.GetFormalCharge()),
-            safe_index_("numH", atom.GetTotalNumHs()),
-            safe_index_("hybridization", str(atom.GetHybridization())),
-            safe_index_("is_aromatic", atom.GetIsAromatic()),
-            safe_index_("is_in_ring5", ringinfo.IsAtomInRingOfSize(idx, 5)),
-            safe_index_("is_in_ring6", ringinfo.IsAtomInRingOfSize(idx, 6)),
+            # safe_index_("chirality", str(atom.GetChiralTag())),
+            # safe_index_("degree", atom.GetTotalDegree()),
+            # safe_index_("numring", ringinfo.NumAtomRings(idx)),
+            # safe_index_("implicit_valence", atom.GetImplicitValence()),
+            # safe_index_("formal_charge", atom.GetFormalCharge()),
+            # safe_index_("numH", atom.GetTotalNumHs()),
+            # safe_index_("hybridization", str(atom.GetHybridization())),
+            # safe_index_("is_aromatic", atom.GetIsAromatic()),
+            # safe_index_("is_in_ring5", ringinfo.IsAtomInRingOfSize(idx, 5)),
+            # safe_index_("is_in_ring6", ringinfo.IsAtomInRingOfSize(idx, 6)),
         ]
         atom_features.append(features)
 
@@ -271,8 +273,8 @@ def safe_index(l, e):
 def featurize_bond(bond):
     bond_feature = [
         safe_index(bond_features_list["bond_type"], str(bond.GetBondType())),
-        safe_index(bond_features_list["bond_stereo"], str(bond.GetStereo())),
-        safe_index(bond_features_list["is_conjugated"], bond.GetIsConjugated()),
+        # safe_index(bond_features_list["bond_stereo"], str(bond.GetStereo())),
+        # safe_index(bond_features_list["is_conjugated"], bond.GetIsConjugated()),
     ]
     return bond_feature
 
@@ -290,7 +292,7 @@ def get_bond_edges(mol):
     return edge_index, edge_attr.type(torch.uint8)
 
 
-def build_bonded_crystal_graph(crystal, pdb_filepath, smiles, num_mols):
+def build_bonded_crystal_graph(crystal, pdb_filepath, smiles, num_mols, removeHs=True):
     frac_coords = crystal.frac_coords
     cart_coords = crystal.cart_coords
     atom_types = crystal.atomic_numbers
@@ -299,11 +301,18 @@ def build_bonded_crystal_graph(crystal, pdb_filepath, smiles, num_mols):
     angles = lattice_parameters[3:]
     
     atom_types = np.array(atom_types)
+
+    if removeHs:
+        heavy_atoms_mask = atom_types != 1
+        atom_types = atom_types[heavy_atoms_mask]
+        frac_coords = frac_coords[heavy_atoms_mask]
+        cart_coords = cart_coords[heavy_atoms_mask]
+
     lengths, angles = np.array(lengths), np.array(angles)
     num_atoms = atom_types.shape[0]
 
     smiles = ".".join([smiles] * num_mols)
-    mol = make_rdkit_mol(cart_coords, atom_types, pdb_filepath, smiles)
+    mol = make_rdkit_mol(cart_coords, atom_types, pdb_filepath, smiles, removeHs=removeHs)
 
     atom_features = featurize_atoms(mol)
     # We only get bonded edges here. We will get cutoff-based edges in cspnet
@@ -313,7 +322,7 @@ def build_bonded_crystal_graph(crystal, pdb_filepath, smiles, num_mols):
     assert np.allclose(crystal.lattice.matrix,
                           lattice_params_to_matrix(*lengths, *angles))
 
-    return frac_coords, atom_types, lengths, angles, num_atoms, atom_features, edge_index, edge_attr
+    return frac_coords, atom_types, lengths, angles, atom_features, edge_index, edge_attr, num_atoms
 
 def build_crystal(crystal_str, niggli=True, primitive=False):
     """Build crystal from cif string."""
@@ -1367,6 +1376,8 @@ class StandardScalerTorch(object):
 
 
 def get_scaler_from_data_list(data_list, key):
+    if key == 'None':
+        return None
     dl = np.asarray([d[key] for d in data_list])
     targets = torch.from_numpy(dl)
     scaler = StandardScalerTorch()
@@ -1478,7 +1489,7 @@ def add_scaled_lattice_prop(data_list, lattice_scale_method):
         # the indexes are brittle if more objects are returned
         lengths = graph_arrays[2]
         angles = graph_arrays[3]
-        num_atoms = graph_arrays[4] # this is -1 in original implementation (we have different order in PDB version)
+        num_atoms = graph_arrays[-1] # this is -1 in original implementation (we have different order in PDB version)
         assert lengths.shape[0] == angles.shape[0] == 3
         assert isinstance(num_atoms, int)
 

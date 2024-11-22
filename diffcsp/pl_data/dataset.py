@@ -14,9 +14,10 @@ from diffcsp.common.data_utils import (
     preprocess, preprocess_tensors, preprocess_pdbs, add_scaled_lattice_prop)
 
 class DatasetPDBFiles(Dataset):
-    def __init__(self, name: ValueNode, folder_path: ValueNode, preprocess_workers: ValueNode, lattice_scale_method: ValueNode, save_path: ValueNode, **kwargs):
+    def __init__(self, name: ValueNode, folder_path: ValueNode, prop: ValueNode, preprocess_workers: ValueNode, lattice_scale_method: ValueNode, save_path: ValueNode, **kwargs):
         super().__init__()
         self.folder_path = folder_path
+        self.prop = prop
         self.preprocess_pdbs(save_path, preprocess_workers, **kwargs)
         add_scaled_lattice_prop(self.cached_data, lattice_scale_method)
 
@@ -34,7 +35,7 @@ class DatasetPDBFiles(Dataset):
     def __getitem__(self, index):
         data_dict = self.cached_data[index]
 
-        (frac_coords, atom_types, lengths, angles, num_atoms, atom_features, edge_index, edge_attr) = data_dict['graph_arrays']
+        (frac_coords, atom_types, lengths, angles, atom_features, edge_index, edge_attr, num_atoms) = data_dict['graph_arrays']
 
         # atom_coords are fractional coordinates
         # edge_index is incremented during batching
@@ -46,9 +47,9 @@ class DatasetPDBFiles(Dataset):
             angles=torch.Tensor(angles).view(1, -1),
             num_atoms=num_atoms,
             num_nodes=num_atoms,  # special attribute used for batching in pytorch geometric
-            atom_features=torch.Tensor(atom_features),
-            edge_index=torch.LongTensor(edge_index),
-            edge_attr=torch.Tensor(edge_attr),
+            # atom_features=torch.Tensor(atom_features),
+            # edge_index=torch.LongTensor(edge_index),
+            # edge_attr=torch.Tensor(edge_attr),
         )
         return data
 

@@ -79,8 +79,20 @@ class CSPLayer(nn.Module):
 
     def node_model(self, node_features, edge_features, edge_index):
 
-        agg = scatter(edge_features, edge_index[0], dim = 0, reduce='mean', dim_size=node_features.shape[0])
+        # print(f"Before scatter: {torch.cuda.memory_allocated()} / {torch.cuda.max_memory_allocated()}")
+
+        batch_size = 4096  # Process edges in chunks
+        num_edges = edge_features.shape[0]
+        agg = torch.zeros((node_features.shape[0], edge_features.shape[1]), device=edge_features.device)
+
+        for start in range(0, num_edges, batch_size):
+            end = min(start + batch_size, num_edges)
+            agg += scatter(edge_features[start:end], edge_index[0][start:end], dim=0, reduce='mean', dim_size=node_features.shape[0])
+
+        # agg = scatter(edge_features, edge_index[0], dim = 0, reduce='mean', dim_size=node_features.shape[0])
+        # print(f"Between scatter and agg: {torch.cuda.memory_allocated()} / {torch.cuda.max_memory_allocated()}")
         agg = torch.cat([node_features, agg], dim = 1)
+        # print(f"After agg: {torch.cuda.memory_allocated()} / {torch.cuda.max_memory_allocated()}")
         out = self.node_mlp(agg)
         return out
 
