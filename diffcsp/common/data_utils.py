@@ -225,14 +225,14 @@ CrystalNN = local_env.CrystalNN(
     distance_cutoffs=None, x_diff_weight=-1, porous_adjustment=False)
 
 
-def make_rdkit_mol(cart_coords, atom_types, pdb_filepath, smiles, removeHs=True):
+def make_rdkit_mol(cart_coords, atom_types, pdb_filepath, smiles, RemoveHs=True):
     raw_mol = Chem.MolFromPDBFile(pdb_filepath)
     mol = Chem.Mol(raw_mol)
 
     template = Chem.MolFromSmiles(smiles)
     mol = AllChem.AssignBondOrdersFromTemplate(template, mol)
     AllChem.AssignStereochemistryFrom3D(mol)
-    if removeHs:
+    if RemoveHs:
         mol = Chem.RemoveHs(mol)
     return mol
 
@@ -292,10 +292,17 @@ def get_bond_edges(mol):
     return edge_index, edge_attr.type(torch.uint8)
 
 
-def build_bonded_crystal_graph(crystal, pdb_filepath, smiles, num_mols, removeHs=True):
+def build_bonded_crystal_graph(crystal, pdb_filepath, smiles, num_mols, RemoveHs=True):
     frac_coords = crystal.frac_coords
     cart_coords = crystal.cart_coords
-    atom_types = crystal.atomic_numbers
+    atom_types = torch.tensor(crystal.atomic_numbers)
+    
+    if RemoveHs:
+        heavy_atoms_mask = (atom_types != 1)
+        frac_coords = frac_coords[heavy_atoms_mask]
+        cart_coords = cart_coords[heavy_atoms_mask]
+        atom_types = atom_types[heavy_atoms_mask]
+    
     lattice_parameters = crystal.lattice.parameters
     lengths = lattice_parameters[:3]
     angles = lattice_parameters[3:]
@@ -312,13 +319,14 @@ def build_bonded_crystal_graph(crystal, pdb_filepath, smiles, num_mols, removeHs
     num_atoms = atom_types.shape[0]
 
     smiles = ".".join([smiles] * num_mols)
-    mol = make_rdkit_mol(cart_coords, atom_types, pdb_filepath, smiles, removeHs=removeHs)
+    mol = make_rdkit_mol(cart_coords, atom_types, pdb_filepath, smiles, RemoveHs=RemoveHs)
 
     atom_features = featurize_atoms(mol)
     # We only get bonded edges here. We will get cutoff-based edges in cspnet
     edge_index, edge_attr = get_bond_edges(mol)
-    edge_index = np.array(edge_index)
 
+    print("crystal.lattice.matrix: ", crystal.lattice.matrix)
+    print("lattice_params_to_matrix(*lengths, *angles): ", lattice_params_to_matrix(*lengths, *angles))
     assert np.allclose(crystal.lattice.matrix,
                           lattice_params_to_matrix(*lengths, *angles))
 
