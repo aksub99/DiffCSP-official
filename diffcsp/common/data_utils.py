@@ -309,7 +309,7 @@ def build_bonded_crystal_graph(crystal, pdb_filepath, smiles, num_mols, RemoveHs
     
     atom_types = np.array(atom_types)
 
-    if removeHs:
+    if RemoveHs:
         heavy_atoms_mask = atom_types != 1
         atom_types = atom_types[heavy_atoms_mask]
         frac_coords = frac_coords[heavy_atoms_mask]
@@ -325,8 +325,6 @@ def build_bonded_crystal_graph(crystal, pdb_filepath, smiles, num_mols, RemoveHs
     # We only get bonded edges here. We will get cutoff-based edges in cspnet
     edge_index, edge_attr = get_bond_edges(mol)
 
-    print("crystal.lattice.matrix: ", crystal.lattice.matrix)
-    print("lattice_params_to_matrix(*lengths, *angles): ", lattice_params_to_matrix(*lengths, *angles))
     assert np.allclose(crystal.lattice.matrix,
                           lattice_params_to_matrix(*lengths, *angles))
 
