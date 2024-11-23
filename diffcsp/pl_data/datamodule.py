@@ -51,7 +51,7 @@ class CrystDataModule(pl.LightningDataModule):
         self.test_datasets: Optional[Sequence[Dataset]] = None
 
         # We don't have prop in our dataset, so we can comment the following line out
-        # self.get_scaler(scaler_path)
+        self.get_scaler(scaler_path)
 
     def prepare_data(self) -> None:
         # download only
