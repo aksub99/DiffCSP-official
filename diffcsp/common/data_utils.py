@@ -14,6 +14,8 @@ from pymatgen.core.lattice import Lattice
 from pymatgen.analysis.graphs import StructureGraph
 from pymatgen.analysis import local_env
 
+# from flowmm.rfm.manifolds.flat_torus import FlatTorus01
+
 from networkx.algorithms.components import is_connected
 
 from sklearn.metrics import accuracy_score, recall_score, precision_score
@@ -791,9 +793,62 @@ def repeat_blocks(
     return res
 
 
+# def knn_frac_neighbors(frac_coords, num_atoms, max_neighbors, lattices, node2graph):
+#     # Total number of atoms
+#     total_atoms = num_atoms.item()
+
+#     # Generate all possible pairs of atom indices
+#     index1, index2 = torch.cartesian_prod(
+#         torch.arange(total_atoms, device=frac_coords.device),
+#         torch.arange(total_atoms, device=frac_coords.device),
+#     ).T
+
+#     # Exclude self-loops (atom paired with itself)
+#     mask_not_self = index1 != index2
+#     index1 = index1[mask_not_self]
+#     index2 = index2[mask_not_self]
+
+#     # Compute fractional differences using logmap for periodic boundaries
+#     frac_diff = FlatTorus01.logmap(frac_coords[index1], frac_coords[index2])
+
+#     # _lattices = self._convert_lin_to_lattice(lattices)
+#     node2graph = node2graph[index1]
+#     lattice_nodes = lattices[node2graph]
+#     # Convert fractional differences to Cartesian distances
+#     cart_diff = torch.einsum("bi,bij->bj", frac_diff, lattice_nodes)
+#     # cart_diff = torch.einsum('ij,kj->ki', lattice, frac_diff)  # Fractional to Cartesian
+#     distances = torch.norm(cart_diff, dim=1)  # Euclidean distances
+
+#     # Find the nearest neighbors for each atom
+#     edge_index = []
+#     frac_diff_neighbors = []
+
+#     for atom_idx in range(total_atoms):
+#         # Select distances for the current atom
+#         mask_current = index1 == atom_idx
+#         current_distances = distances[mask_current]
+#         current_pairs = index2[mask_current]  # Neighbor indices
+#         current_diffs = frac_diff[mask_current]  # Neighbor fractional differences
+
+#         # Sort by distance and select the top `max_neighbors`
+#         sorted_indices = torch.argsort(current_distances)
+#         selected_indices = sorted_indices[:max_neighbors]
+
+#         # Add edges and fractional differences for selected neighbors
+#         edge_index.append(torch.stack((current_pairs[selected_indices], torch.full_like(selected_indices, atom_idx))))
+#         frac_diff_neighbors.append(current_diffs[selected_indices])
+
+#     # Concatenate results for all atoms
+#     edge_index = torch.cat(edge_index, dim=1)
+#     frac_diff_neighbors = torch.cat(frac_diff_neighbors, dim=0)
+
+#     return edge_index, frac_diff_neighbors
+
 
 def radius_graph_pbc(pos, lengths, angles, natoms, radius, max_num_neighbors_threshold, device, lattices=None):
     
+    # print(f"Before nn search: {torch.cuda.memory_allocated()/10**9} / {torch.cuda.max_memory_allocated()/10**9}")
+    # print("Before graph creation: ", torch.cuda.memory_reserved(), torch.cuda.memory_allocated())
     # device = pos.device
     batch_size = len(natoms)
     if lattices is None:
@@ -920,7 +975,7 @@ def radius_graph_pbc(pos, lengths, angles, natoms, radius, max_num_neighbors_thr
     # Remove pairs that are too far apart
     
     
-    radius_real = (min_dist.min(dim=-1)[0] + 0.01)#.clamp(max=radius)
+    radius_real = (min_dist.min(dim=-1)[0] + 0.01).clamp(max=radius)
     
     radius_real = torch.repeat_interleave(radius_real, num_atoms_per_image_sqr * num_cells)
 
@@ -970,7 +1025,8 @@ def radius_graph_pbc(pos, lengths, angles, natoms, radius, max_num_neighbors_thr
         num_neighbors_image = segment_csr(num_neighbors, image_indptr)
 
     edge_index = torch.stack((index2, index1))
-
+    # print("After graph creation: ", torch.cuda.memory_reserved(), torch.cuda.memory_allocated())
+    # print(f"After nn search: {torch.cuda.memory_allocated()/10**9} / {torch.cuda.max_memory_allocated()/10**9}")
     return edge_index, unit_cell, num_neighbors_image
 
 
@@ -1034,7 +1090,9 @@ def get_max_neighbors_mask(
     # Sort neighboring atoms based on distance
     distance_sort, index_sort = torch.sort(distance_sort, dim=1)
     # Select the max_num_neighbors_threshold neighbors that are closest
-    distance_real_cutoff = distance_sort[:,max_num_neighbors_threshold].reshape(-1,1).expand(-1,max_num_neighbors) + 0.01
+    # The 0.01 is very significant in organic molecules, where atoms are very close
+    distance_real_cutoff = distance_sort[:,max_num_neighbors_threshold].reshape(-1,1).expand(-1,max_num_neighbors)
+    # distance_real_cutoff = distance_sort[:,max_num_neighbors_threshold].reshape(-1,1).expand(-1,max_num_neighbors) + 0.01
     
     mask_distance = distance_sort < distance_real_cutoff
     
