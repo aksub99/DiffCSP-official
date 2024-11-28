@@ -47,9 +47,9 @@ class DatasetPDBFiles(Dataset):
             angles=torch.Tensor(angles).view(1, -1),
             num_atoms=num_atoms,
             num_nodes=num_atoms,  # special attribute used for batching in pytorch geometric
-            # atom_features=torch.Tensor(atom_features),
-            # edge_index=torch.LongTensor(edge_index),
-            # edge_attr=torch.Tensor(edge_attr),
+            atom_features=torch.FloatTensor(atom_features.float()),
+            edge_index=torch.LongTensor(edge_index),
+            edge_attr=torch.Tensor(edge_attr),
         )
         return data
 

@@ -249,16 +249,16 @@ def featurize_atoms(mol):
     for idx, atom in enumerate(mol.GetAtoms()):
         features = [
             safe_index_("atomic_num", atom.GetAtomicNum()),
-            # safe_index_("chirality", str(atom.GetChiralTag())),
-            # safe_index_("degree", atom.GetTotalDegree()),
-            # safe_index_("numring", ringinfo.NumAtomRings(idx)),
-            # safe_index_("implicit_valence", atom.GetImplicitValence()),
-            # safe_index_("formal_charge", atom.GetFormalCharge()),
+            safe_index_("chirality", str(atom.GetChiralTag())),
+            safe_index_("degree", atom.GetTotalDegree()),
+            safe_index_("numring", ringinfo.NumAtomRings(idx)),
+            safe_index_("implicit_valence", atom.GetImplicitValence()),
+            safe_index_("formal_charge", atom.GetFormalCharge()),
             # safe_index_("numH", atom.GetTotalNumHs()),
-            # safe_index_("hybridization", str(atom.GetHybridization())),
-            # safe_index_("is_aromatic", atom.GetIsAromatic()),
-            # safe_index_("is_in_ring5", ringinfo.IsAtomInRingOfSize(idx, 5)),
-            # safe_index_("is_in_ring6", ringinfo.IsAtomInRingOfSize(idx, 6)),
+            safe_index_("hybridization", str(atom.GetHybridization())),
+            safe_index_("is_aromatic", atom.GetIsAromatic()),
+            safe_index_("is_in_ring5", ringinfo.IsAtomInRingOfSize(idx, 5)),
+            safe_index_("is_in_ring6", ringinfo.IsAtomInRingOfSize(idx, 6)),
         ]
         atom_features.append(features)
 
@@ -276,7 +276,7 @@ def featurize_bond(bond):
     bond_feature = [
         safe_index(bond_features_list["bond_type"], str(bond.GetBondType())),
         # safe_index(bond_features_list["bond_stereo"], str(bond.GetStereo())),
-        # safe_index(bond_features_list["is_conjugated"], bond.GetIsConjugated()),
+        safe_index(bond_features_list["is_conjugated"], bond.GetIsConjugated()),
     ]
     return bond_feature
 
