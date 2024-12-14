@@ -14,18 +14,19 @@ from diffcsp.common.data_utils import (
     preprocess, preprocess_tensors, preprocess_pdbs, add_scaled_lattice_prop)
 
 class DatasetPDBFiles(Dataset):
-    def __init__(self, name: ValueNode, folder_path: ValueNode, prop: ValueNode, preprocess_workers: ValueNode, lattice_scale_method: ValueNode, save_path: ValueNode, **kwargs):
+    def __init__(self, name: ValueNode, folder_path: ValueNode, prop: ValueNode, preprocess_workers: ValueNode, lattice_scale_method: ValueNode, save_path: ValueNode, scale: ValueNode, **kwargs):
         super().__init__()
         self.folder_path = folder_path
         self.prop = prop
-        self.preprocess_pdbs(save_path, preprocess_workers, **kwargs)
+        self.scale=scale
+        self.preprocess_pdbs(save_path, preprocess_workers, scale, **kwargs)
         add_scaled_lattice_prop(self.cached_data, lattice_scale_method)
 
-    def preprocess_pdbs(self, save_path, preprocess_workers, **kwargs):
+    def preprocess_pdbs(self, save_path, preprocess_workers, scale, **kwargs):
         if os.path.exists(save_path):
             self.cached_data = torch.load(save_path)
         else:
-            cached_data = preprocess_pdbs(self.folder_path, preprocess_workers, smiles=kwargs['smiles'], num_mols=kwargs['num_mols'])
+            cached_data = preprocess_pdbs(self.folder_path, preprocess_workers, smiles=kwargs['smiles'], num_mols=kwargs['num_mols'], scale=scale)
             torch.save(cached_data, save_path)
             self.cached_data = cached_data
 
