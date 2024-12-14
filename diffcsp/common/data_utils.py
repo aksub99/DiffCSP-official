@@ -4,6 +4,7 @@ import networkx as nx
 import torch
 import copy
 import os
+import re
 import itertools
 
 from rdkit import Chem
@@ -141,6 +142,120 @@ atom_features_list = {
     "is_in_ring7": [False, True],
     "is_in_ring8": [False, True],
 }
+
+def find_isotope_mass_from_string(smi):
+    return [int(mass) for mass in re.findall(r"\[(\d+)He\]", smi)]
+
+class FragmentDecomp:
+    # From our paper: https://arxiv.org/abs/2410.08833
+    def __init__(self, smiles):
+        self.fragments_set = set()
+        self.smiles = smiles
+        self.reactant_smarts = "[*&R1:1]!@;-[*&!He&R0,*&R1:2]"
+        self.mapper_dict, self.mapper_dict_inverse = self.map_unique_fragments(
+            self.smiles
+        )
+
+    def fill_inert_positions(self, smi, fragments_tuple_list):
+        mol = Chem.MolFromSmiles(smi)
+        for frag_smi, isotope_number in fragments_tuple_list:
+            reaction_smarts = "[*:1][{}He].[*:2][{}He]>>[*:1]-[*:2]".format(
+                isotope_number, isotope_number
+            )
+            mol2 = Chem.MolFromSmiles(frag_smi)
+            rxn = AllChem.ReactionFromSmarts(reaction_smarts)
+            products = rxn.RunReactants((mol, mol2))
+            mol = products[0][0]
+        return Chem.MolToSmiles(mol)
+
+    def run_decomposition_reaction(self, smiles, dummy1="Ne", dummy2="Ne"):
+        reaction_smarts = "{}>>[*:1][{}].[*:2][{}]".format(
+            self.reactant_smarts, dummy1, dummy2
+        )
+        mol = Chem.MolFromSmiles(smiles)
+        rxn = AllChem.ReactionFromSmarts(reaction_smarts)
+        products = rxn.RunReactants((mol,))
+        return products
+
+    def map_unique_fragments(self, smiles):
+        products = self.run_decomposition_reaction(smiles)
+        mapper_dict = {}
+        mapper_dict_inverse = {}
+        isotope_mass = 100
+        for prod_pair in products:
+            for prod in prod_pair:
+                canonical_smiles = Chem.MolToSmiles(prod)
+                if canonical_smiles not in mapper_dict:
+                    mapper_dict[canonical_smiles] = isotope_mass
+                    mapper_dict_inverse[isotope_mass] = canonical_smiles.replace(
+                        "Ne", "{}He".format(isotope_mass)
+                    )
+                    isotope_mass += 1
+        return mapper_dict, mapper_dict_inverse
+
+    def uniquify(self, original_list):
+        unique_list = []
+        seen = set()
+
+        for item in original_list:
+            if item not in seen:
+                unique_list.append(item)
+                seen.add(item)
+        return unique_list
+
+    def get_fragments(self):
+        fragments = list(self._get_fragments(self.smiles))
+        canon_fragments = []
+        for frag in fragments:
+            canon_fragments.append(Chem.CanonSmiles(frag))
+
+        for i, frag in enumerate(canon_fragments):
+            masses = self.uniquify(find_isotope_mass_from_string(frag))
+            new_masses = list(range(100, 100 + len(masses)))
+            assert len(masses) == len(new_masses)
+            for j, mass in enumerate(masses):
+                canon_fragments[i] = canon_fragments[i].replace(
+                    str(mass), str(new_masses[j])
+                )
+        return set(canon_fragments)
+
+    def _get_fragments(self, smiles, memo={}):
+        if smiles in memo:
+            return memo[smiles]
+
+        products = self.run_decomposition_reaction(smiles, dummy1="Ne", dummy2="Ne")
+        product_smiles_list = [Chem.MolToSmiles(prod) for prod in products[0]]
+        filled_smiles_list = copy.deepcopy(product_smiles_list)
+        for i, prod in enumerate(products[0]):
+            prod_smiles = Chem.MolToSmiles(prod)
+            if "He" in prod_smiles:
+                isotope_masses = find_isotope_mass_from_string(prod_smiles)
+                fragments_tuple_list = [
+                    (self.mapper_dict_inverse[isotope_mass], isotope_mass)
+                    for isotope_mass in isotope_masses
+                ]
+                filled_smiles = self.fill_inert_positions(
+                    prod_smiles, fragments_tuple_list
+                )
+                filled_smiles_list[i] = filled_smiles
+
+        new_smiles_list = [
+            smi.replace(
+                "Ne", "{}He".format(self.mapper_dict[filled_smiles_list[1 - i]])
+            )
+            for i, smi in enumerate(product_smiles_list)
+        ]
+        new_mols_list = [Chem.MolFromSmiles(smi) for smi in new_smiles_list]
+        for i, prod in enumerate(new_mols_list):
+            if prod == None:
+                print("Prod is none: ", new_smiles_list[i])
+                print(self.smiles)
+            if prod.HasSubstructMatch(Chem.MolFromSmarts(self.reactant_smarts)):
+                self._get_fragments(new_smiles_list[i], memo)
+            else:
+                self.fragments_set.add(new_smiles_list[i])
+        memo[smiles] = self.fragments_set
+        return self.fragments_set
 
 
 CrystalNN = local_env.CrystalNN(
@@ -315,6 +430,10 @@ def build_bonded_crystal_graph(crystal, pdb_whole_filepath, smiles, num_mols, Re
 
     lengths, angles = np.array(lengths), np.array(angles)
     num_atoms = atom_types.shape[0]
+
+    if scale == 'dual':
+        frag_obj = FragmentDecomp(Chem.CanonSmiles(smiles))
+        print(frag_obj.get_fragments())
 
     smiles = ".".join([smiles] * num_mols)
     # Make rdkit mol from version with molecules made whole at PBC edges
