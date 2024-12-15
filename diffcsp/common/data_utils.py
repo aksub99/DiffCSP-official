@@ -570,6 +570,7 @@ def build_bonded_crystal_graph(crystal, pdb_whole_filepath, smiles, num_mols, Re
         frag_obj = FragmentDecomp(smiles)
         fragments = frag_obj.get_fragments()
 
+
     smiles = ".".join([smiles] * num_mols)
     # Make rdkit mol from version with molecules made whole at PBC edges
     mol = make_rdkit_mol(pdb_whole_filepath, smiles, RemoveHs=RemoveHs)
@@ -2156,21 +2157,8 @@ def get_fragment_atom_mapping_with_smarts(fragments, mol):
     return fragment_atom_mapping, cg_beads
 
 if __name__ == '__main__':
+    # Test ovito vs torch implementation
     # test_radius_graph_pbc()
-    # smiles = "CCCCC(CC)Cn1c2c3sc(C=C4C(=O)c5cc(F)c(F)cc5C4=C(C#N)C#N)c(CCCCCCCCCCC)c3sc2c2c3nsnc3c3c4sc5c(CCCCCCCCCCC)c(C=C6C(=O)c7cc(F)c(F)cc7C6=C(C#N)C#N)sc5c4n(CC(CC)CCCC)c3c21"
-    # frag_obj = FragmentDecomp(smiles)
-    # fragments = frag_obj.get_fragments()  # This is assumed to provide SMARTS strings for fragments
-    # smiles = ".".join([smiles] * 5)
-    # mol = make_rdkit_mol(None, None, '/home/gridsan/sakshay/experiments/flowmm/y6_5_frames/train/frame0.pdb', smiles)
-
-    # # Create a dictionary mapping fragments (SMARTS) to their respective atom indices in mol
-    # fragment_atom_mapping = get_fragment_atom_mapping_with_smarts(fragments, mol)
-
-    # # Print the results
-    # for frag, indices in fragment_atom_mapping.items():
-    #     print(f"Fragment (SMARTS): {frag}")
-    #     print(f"Atom Indices: {indices}")
-    #     print(len(indices))
 
     # Toy Example (1D Fractional Coordinates)
     frac_coords = torch.tensor([
@@ -2195,3 +2183,18 @@ if __name__ == '__main__':
 
     # Print the results
     print("\nBead Fractional Coordinates (Intrinsic Mean):", bead_frac_coords)
+    
+    smiles = "CCCCC(CC)Cn1c2c3sc(C=C4C(=O)c5cc(F)c(F)cc5C4=C(C#N)C#N)c(CCCCCCCCCCC)c3sc2c2c3nsnc3c3c4sc5c(CCCCCCCCCCC)c(C=C6C(=O)c7cc(F)c(F)cc7C6=C(C#N)C#N)sc5c4n(CC(CC)CCCC)c3c21"
+    frag_obj = FragmentDecomp(smiles)
+    fragments = frag_obj.get_fragments()  # This is assumed to provide SMARTS strings for fragments
+    smiles = ".".join([smiles] * 5)
+    mol = make_rdkit_mol(None, None, '/home/gridsan/sakshay/experiments/flowmm/y6_5_frames/train/frame0.pdb', smiles)
+    
+    # Create a dictionary mapping fragments (SMARTS) to their respective atom indices in mol
+    fragment_atom_mapping = get_fragment_atom_mapping_with_smarts(fragments, mol)
+
+    # Print the results
+    for frag, indices in fragment_atom_mapping.items():
+        print(f"Fragment (SMARTS): {frag}")
+        print(f"Atom Indices: {indices}")
+        print(len(indices))
