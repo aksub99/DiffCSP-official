@@ -435,6 +435,7 @@ def build_bonded_crystal_graph(crystal, pdb_whole_filepath, smiles, num_mols, Re
         frag_obj = FragmentDecomp(Chem.CanonSmiles(smiles))
         print(frag_obj.get_fragments())
 
+
     smiles = ".".join([smiles] * num_mols)
     # Make rdkit mol from version with molecules made whole at PBC edges
     mol = make_rdkit_mol(pdb_whole_filepath, smiles, RemoveHs=RemoveHs)
@@ -1945,5 +1946,82 @@ def test_radius_graph_pbc():
     
     print("Test passed: Both functions return the same results.")
 
+
+def remove_helium_atoms(smiles):
+    """
+    Removes Helium atoms from a SMILES string.
+
+    Args:
+        smiles (str): Input SMILES string.
+
+    Returns:
+        str: SMILES string without Helium atoms.
+    """
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        print(f"Error: Unable to parse SMILES: {smiles}")
+        return None
+
+    # Identify Helium atoms (atomic number 2) and remove them
+    to_remove = [atom.GetIdx() for atom in mol.GetAtoms() if atom.GetAtomicNum() == 2]
+    if to_remove:
+        editable_mol = Chem.EditableMol(mol)
+        for idx in sorted(to_remove, reverse=True):
+            editable_mol.RemoveAtom(idx)
+        mol = editable_mol.GetMol()
+
+    return Chem.MolToSmiles(mol)  # Return the updated SMILES
+
+def get_fragment_atom_mapping_with_smarts(fragments, mol):
+    """
+    Create a mapping between fragments (SMARTS) and their corresponding atom indices within the RDKit molecule.
+
+    Args:
+        fragments (set): A set of fragment SMARTS strings.
+        mol (Chem.Mol): An RDKit molecule object.
+
+    Returns:
+        dict: A dictionary where keys are fragment SMARTS strings and values are lists of atom indices.
+    """
+    fragment_atom_mapping = {}
+
+    # Preprocess fragments to remove Helium atoms and convert to SMARTS
+    processed_fragments = {remove_helium_atoms(frag) for frag in fragments if remove_helium_atoms(frag)}
+    print("Processed Fragments (after removing Helium):", processed_fragments)
+
+    # Convert fragments (SMARTS strings) to RDKit molecule objects
+    fragment_mols = {frag: Chem.MolFromSmarts(frag) for frag in processed_fragments}
+
+    for frag_smarts, frag_mol in fragment_mols.items():
+        if frag_mol is None:
+            print(f"Error: Unable to parse fragment SMARTS: {frag_smarts}")
+            continue
+        
+        # Get atom indices mapping using substructure search with SMARTS
+        matches = mol.GetSubstructMatches(frag_mol)
+        for match in matches:
+            # Convert the match tuple to a list of atom indices
+            atom_indices = list(match)
+            # Append to the mapping, ensuring each fragment maps to all occurrences
+            if frag_smarts not in fragment_atom_mapping:
+                fragment_atom_mapping[frag_smarts] = []
+            fragment_atom_mapping[frag_smarts].append(atom_indices)
+    
+    return fragment_atom_mapping
+
 if __name__ == '__main__':
     test_radius_graph_pbc()
+    smiles = "CCCCC(CC)Cn1c2c3sc(C=C4C(=O)c5cc(F)c(F)cc5C4=C(C#N)C#N)c(CCCCCCCCCCC)c3sc2c2c3nsnc3c3c4sc5c(CCCCCCCCCCC)c(C=C6C(=O)c7cc(F)c(F)cc7C6=C(C#N)C#N)sc5c4n(CC(CC)CCCC)c3c21"
+    frag_obj = FragmentDecomp(smiles)
+    fragments = frag_obj.get_fragments()  # This is assumed to provide SMARTS strings for fragments
+    smiles = ".".join([smiles] * 5)
+    mol = make_rdkit_mol(None, None, '/home/gridsan/sakshay/experiments/flowmm/y6_5_frames/train/frame0.pdb', smiles)
+    
+    # Create a dictionary mapping fragments (SMARTS) to their respective atom indices in mol
+    fragment_atom_mapping = get_fragment_atom_mapping_with_smarts(fragments, mol)
+
+    # Print the results
+    for frag, indices in fragment_atom_mapping.items():
+        print(f"Fragment (SMARTS): {frag}")
+        print(f"Atom Indices: {indices}")
+        print(len(indices))
