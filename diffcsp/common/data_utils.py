@@ -5,6 +5,7 @@ import torch
 import copy
 import os
 import re
+import math
 import itertools
 
 from rdkit import Chem
@@ -355,6 +356,46 @@ def make_rdkit_mol(pdb_filepath, smiles, RemoveHs=True):
         mol = Chem.RemoveHs(mol)
     return mol
 
+def featurize_beads(mol, cg_beads):
+    atom_features = []
+    ringinfo = mol.GetRingInfo()
+
+    def safe_index_(key, val):
+        return safe_index(atom_features_list[key], val)
+
+    for idx, atom in enumerate(mol.GetAtoms()):
+        features = [
+            safe_index_("atomic_num", atom.GetAtomicNum()),
+            # safe_index_("chirality", str(atom.GetChiralTag())),
+            safe_index_("degree", atom.GetTotalDegree()),
+            safe_index_("numring", ringinfo.NumAtomRings(idx)),
+            safe_index_("implicit_valence", atom.GetImplicitValence()),
+            safe_index_("formal_charge", atom.GetFormalCharge()),
+            # safe_index_("numH", atom.GetTotalNumHs()),
+            # safe_index_("hybridization", str(atom.GetHybridization())),
+            safe_index_("is_aromatic", atom.GetIsAromatic()),
+            safe_index_("is_in_ring5", ringinfo.IsAtomInRingOfSize(idx, 5)),
+            safe_index_("is_in_ring6", ringinfo.IsAtomInRingOfSize(idx, 6)),
+        ]
+        atom_features.append(features)
+
+    atom_features = torch.tensor(atom_features)  # Convert to a tensor for aggregation
+
+    bead_features = []
+    for bead in cg_beads:
+        bead_feature = []
+        bead_atoms = atom_features[bead]  # Select atom features for the current bead
+
+        for col in range(bead_atoms.shape[1]):
+            if col in [5, 6, 7]:  # Boolean features (is_aromatic, is_in_ring5, is_in_ring6)
+                bead_feature.append(torch.any(bead_atoms[:, col].bool()).item())
+            else:  # Integer features
+                bead_feature.append(torch.mean(bead_atoms[:, col].float()).item().int())
+
+        bead_features.append(bead_feature)
+
+    return bead_features    
+
 
 def featurize_atoms(mol):
     atom_features = []
@@ -397,6 +438,29 @@ def featurize_bond(bond):
     ]
     return bond_feature
 
+def get_bead_bond_edges(mol, cg_beads):
+    row, col, edge_attr = [], [], []
+
+    # Create a mapping from atom index to bead index
+    atom_to_bead = {}
+    for bead_idx, bead_atoms in enumerate(cg_beads):
+        for atom_idx in bead_atoms:
+            atom_to_bead[atom_idx] = bead_idx
+
+    for bond in mol.GetBonds():
+        start, end = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
+
+        # Check if the start and end atoms belong to different beads
+        if atom_to_bead.get(start) != atom_to_bead.get(end):
+            row += [start, end]
+            col += [end, start]
+            edge_attr += [featurize_bond(bond)]
+
+    edge_index = torch.tensor([row, col], dtype=torch.long)
+    edge_attr = torch.tensor(edge_attr)
+
+    return edge_index, edge_attr.type(torch.uint8)
+
 def get_bond_edges(mol):
     row, col, edge_attr = [], [], []
     for bond in mol.GetBonds():
@@ -410,6 +474,77 @@ def get_bond_edges(mol):
     edge_attr = torch.concat([edge_attr, edge_attr], 0)
     return edge_index, edge_attr.type(torch.uint8)
 
+def dist(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    def logmap(x, y):
+        z = 2 * math.pi * (y - x)
+        return torch.atan2(torch.sin(z), torch.cos(z)) / (2 * math.pi)
+    log = logmap(x, y)
+    dist = torch.norm(log, dim=-1, keepdim=False)
+    return dist
+
+def frechet_mean(frac_coords: torch.Tensor, dist_fn, tol=1e-6, max_iter=100) -> torch.Tensor:
+    """
+    Calculate the Fréchet mean of a set of points using gradient descent.
+
+    Args:
+        frac_coords (torch.Tensor): Fractional coordinates of atoms belonging to a bead (N, 3).
+        dist_fn (callable): Distance function on the manifold.
+        tol (float): Convergence tolerance.
+        max_iter (int): Maximum number of iterations.
+
+    Returns:
+        torch.Tensor: Fréchet mean fractional coordinate (1, 3).
+    """
+    # Initialize mean as the coordinates of first point
+    mu = frac_coords[0].clone().detach().requires_grad_(True)
+    # mu = torch.mean(frac_coords, dim=0, keepdim=True).clone().detach()
+    # mu.requires_grad = True
+
+    optimizer = torch.optim.SGD([mu], lr=0.1)
+
+    for _ in range(max_iter):
+        optimizer.zero_grad()
+        
+        # Compute distances and squared distance sum
+        distances = dist_fn(mu, frac_coords)  # Shape: (N,)
+        loss = torch.sum(distances**2)  # Squared sum of distances
+
+        # Check convergence
+        if loss.item() < tol:
+            break
+
+        # Backpropagate and optimize
+        loss.backward()
+        # print(loss)
+        optimizer.step()
+        mu.data = mu.data % 1.0  # Project onto the flat torus
+    return mu.detach()
+
+def calculate_bead_frac_coords(frac_coords: torch.Tensor, cg_beads: dict, dist_fn) -> torch.Tensor:
+    """
+    Calculate fractional coordinates of beads as the intrinsic mean
+    of fractional coordinates of all atoms belonging to each bead.
+
+    Args:
+        frac_coords (torch.Tensor): Fractional coordinates of all atoms (N, 3).
+        cg_beads (dict): Mapping from bead index to list of atom indices belonging to the bead.
+        dist_fn (callable): Distance function on the manifold.
+
+    Returns:
+        torch.Tensor: Fractional coordinates of beads (M, 3), where M is the number of beads.
+    """
+    bead_frac_coords = []
+
+    for atom_indices in cg_beads:
+        # Extract fractional coordinates of atoms belonging to this bead
+        atom_coords = frac_coords[atom_indices]  # Shape: (num_atoms_in_bead, 3)
+
+        # Compute Fréchet mean using the distance function
+        mean_coord = frechet_mean(atom_coords, dist_fn)  # Shape: (1, 3)
+        bead_frac_coords.append(mean_coord)
+
+    # Stack all bead fractional coordinates into a tensor
+    return torch.vstack(bead_frac_coords)
 
 def build_bonded_crystal_graph(crystal, pdb_whole_filepath, smiles, num_mols, RemoveHs=True):
     frac_coords = crystal.frac_coords
@@ -432,9 +567,8 @@ def build_bonded_crystal_graph(crystal, pdb_whole_filepath, smiles, num_mols, Re
     num_atoms = atom_types.shape[0]
 
     if scale == 'dual':
-        frag_obj = FragmentDecomp(Chem.CanonSmiles(smiles))
-        print(frag_obj.get_fragments())
-
+        frag_obj = FragmentDecomp(smiles)
+        fragments = frag_obj.get_fragments()
 
     smiles = ".".join([smiles] * num_mols)
     # Make rdkit mol from version with molecules made whole at PBC edges
@@ -446,6 +580,15 @@ def build_bonded_crystal_graph(crystal, pdb_whole_filepath, smiles, num_mols, Re
 
     assert np.allclose(crystal.lattice.matrix,
                           lattice_params_to_matrix(*lengths, *angles))
+
+    if scale == 'dual':
+        _, cg_beads = get_fragment_atom_mapping_with_smarts(fragments, mol)
+        bead_features = featurize_beads(mol, cg_beads)
+        bead_edge_index, bead_edge_attr = get_bead_bond_edges(mol, cg_beads)
+
+        # Calculate bead fractional coordinates using the Fréchet mean
+        bead_frac_coords = calculate_bead_frac_coords(frac_coords, cg_beads, dist)
+        return frac_coords, atom_types, lengths, angles, atom_features, edge_index, edge_attr, bead_features, bead_edge_index, bead_edge_attr, bead_frac_coords, num_atoms
 
     return frac_coords, atom_types, lengths, angles, atom_features, edge_index, edge_attr, num_atoms
 
@@ -2001,27 +2144,54 @@ def get_fragment_atom_mapping_with_smarts(fragments, mol):
         matches = mol.GetSubstructMatches(frag_mol)
         for match in matches:
             # Convert the match tuple to a list of atom indices
-            atom_indices = list(match)
+            atom_indices = torch.tensor(list(match))
             # Append to the mapping, ensuring each fragment maps to all occurrences
             if frag_smarts not in fragment_atom_mapping:
                 fragment_atom_mapping[frag_smarts] = []
             fragment_atom_mapping[frag_smarts].append(atom_indices)
     
-    return fragment_atom_mapping
+    cg_beads = []
+    for val in fragment_atom_mapping.values():
+        cg_beads.append(val)
+    return fragment_atom_mapping, cg_beads
 
 if __name__ == '__main__':
-    test_radius_graph_pbc()
-    smiles = "CCCCC(CC)Cn1c2c3sc(C=C4C(=O)c5cc(F)c(F)cc5C4=C(C#N)C#N)c(CCCCCCCCCCC)c3sc2c2c3nsnc3c3c4sc5c(CCCCCCCCCCC)c(C=C6C(=O)c7cc(F)c(F)cc7C6=C(C#N)C#N)sc5c4n(CC(CC)CCCC)c3c21"
-    frag_obj = FragmentDecomp(smiles)
-    fragments = frag_obj.get_fragments()  # This is assumed to provide SMARTS strings for fragments
-    smiles = ".".join([smiles] * 5)
-    mol = make_rdkit_mol(None, None, '/home/gridsan/sakshay/experiments/flowmm/y6_5_frames/train/frame0.pdb', smiles)
-    
-    # Create a dictionary mapping fragments (SMARTS) to their respective atom indices in mol
-    fragment_atom_mapping = get_fragment_atom_mapping_with_smarts(fragments, mol)
+    # test_radius_graph_pbc()
+    # smiles = "CCCCC(CC)Cn1c2c3sc(C=C4C(=O)c5cc(F)c(F)cc5C4=C(C#N)C#N)c(CCCCCCCCCCC)c3sc2c2c3nsnc3c3c4sc5c(CCCCCCCCCCC)c(C=C6C(=O)c7cc(F)c(F)cc7C6=C(C#N)C#N)sc5c4n(CC(CC)CCCC)c3c21"
+    # frag_obj = FragmentDecomp(smiles)
+    # fragments = frag_obj.get_fragments()  # This is assumed to provide SMARTS strings for fragments
+    # smiles = ".".join([smiles] * 5)
+    # mol = make_rdkit_mol(None, None, '/home/gridsan/sakshay/experiments/flowmm/y6_5_frames/train/frame0.pdb', smiles)
+
+    # # Create a dictionary mapping fragments (SMARTS) to their respective atom indices in mol
+    # fragment_atom_mapping = get_fragment_atom_mapping_with_smarts(fragments, mol)
+
+    # # Print the results
+    # for frag, indices in fragment_atom_mapping.items():
+    #     print(f"Fragment (SMARTS): {frag}")
+    #     print(f"Atom Indices: {indices}")
+    #     print(len(indices))
+
+    # Toy Example (1D Fractional Coordinates)
+    frac_coords = torch.tensor([
+        [0.1, 0.1, 0.1],
+        [0.85, 0.85, 0.85],
+        [0.2, 0.2, 0.2],
+        [0.8, 0.8, 0.8],
+        [0.15, 0.15, 0.15],
+        [0.85, 0.85, 0.85]
+    ])
+    # frac_coords = torch.tensor([torch.tensor([0.1, 0.1, 0.1]), torch.tensor([0.9, 0.9, 0.9]), torch.tensor([0.2, 0.2, 0.2]), torch.tensor([0.8, 0.8, 0.8]), torch.tensor([0.15, 0.15, 0.15]), torch.tensor([0.85, 0.85, 0.85])])  # Fractional coordinates of atoms
+
+    # Bead-to-Atom Mapping (1D example)
+    cg_beads = [torch.tensor([0, 1]), torch.tensor([2, 3]), torch.tensor([4, 5])]
+
+    # Print the input data
+    print("Fractional Coordinates (All Atoms):", frac_coords)
+    print("Bead-to-Atom Mapping:", cg_beads)
+
+    # Calculate bead fractional coordinates using Fréchet mean
+    bead_frac_coords = calculate_bead_frac_coords(frac_coords, cg_beads, dist)
 
     # Print the results
-    for frag, indices in fragment_atom_mapping.items():
-        print(f"Fragment (SMARTS): {frag}")
-        print(f"Atom Indices: {indices}")
-        print(len(indices))
+    print("\nBead Fractional Coordinates (Intrinsic Mean):", bead_frac_coords)
