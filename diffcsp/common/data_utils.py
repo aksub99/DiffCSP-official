@@ -145,6 +145,7 @@ atom_features_list = {
 CrystalNN = local_env.CrystalNN(
     distance_cutoffs=None, x_diff_weight=-1, porous_adjustment=False)
 
+# Not tested to be robust to different PDB formats 
 class PDBParser:
     def __init__(self, filepath):
         self.filepath = filepath
@@ -227,7 +228,7 @@ CrystalNN = local_env.CrystalNN(
     distance_cutoffs=None, x_diff_weight=-1, porous_adjustment=False)
 
 
-def make_rdkit_mol(cart_coords, atom_types, pdb_filepath, smiles, RemoveHs=True):
+def make_rdkit_mol(pdb_filepath, smiles, RemoveHs=True):
     raw_mol = Chem.MolFromPDBFile(pdb_filepath)
     mol = Chem.Mol(raw_mol)
 
@@ -294,7 +295,7 @@ def get_bond_edges(mol):
     return edge_index, edge_attr.type(torch.uint8)
 
 
-def build_bonded_crystal_graph(crystal, pdb_filepath, smiles, num_mols, RemoveHs=True):
+def build_bonded_crystal_graph(crystal, pdb_whole_filepath, smiles, num_mols, RemoveHs=True):
     frac_coords = crystal.frac_coords
     cart_coords = crystal.cart_coords
     atom_types = torch.tensor(crystal.atomic_numbers)
@@ -321,7 +322,8 @@ def build_bonded_crystal_graph(crystal, pdb_filepath, smiles, num_mols, RemoveHs
     num_atoms = atom_types.shape[0]
 
     smiles = ".".join([smiles] * num_mols)
-    mol = make_rdkit_mol(cart_coords, atom_types, pdb_filepath, smiles, RemoveHs=RemoveHs)
+    # Make rdkit mol from version with molecules made whole at PBC edges
+    mol = make_rdkit_mol(pdb_whole_filepath, smiles, RemoveHs=RemoveHs)
 
     atom_features = featurize_atoms(mol)
     # We only get bonded edges here. We will get cutoff-based edges in cspnet
@@ -1448,10 +1450,14 @@ def get_scaler_from_data_list(data_list, key):
     scaler.fit(targets)
     return scaler
 
-def process_one_pdb(file_path, **kwargs):
+def process_one_pdb(filename, input_folder, input_folder_whole, **kwargs):
+    file_path = os.path.join(input_folder, filename)
+    file_path_whole = os.path.join(input_folder_whole, filename)
     crystal = build_crystal_from_pdb(file_path)
 
-    graph_arrays = build_bonded_crystal_graph(crystal, pdb_filepath=file_path, smiles=kwargs['smiles'], num_mols=kwargs['num_mols'])
+    # Rdkit molecule objects are made with pdb version where molecules are made whole at pbc boundaries
+    # TODO: Modify later to directly use mdtraj to do unwrapping
+    graph_arrays = build_bonded_crystal_graph(crystal, pdb_whole_filepath=file_path_whole, smiles=kwargs['smiles'], num_mols=kwargs['num_mols'])
     result_dict = {
         'frame_id': int(file_path.split('.')[0][-1]),
         'file_path': file_path,
@@ -1460,10 +1466,12 @@ def process_one_pdb(file_path, **kwargs):
     return result_dict
 
 def preprocess_pdbs(input_folder, num_workers, **kwargs):
-    process_func = partial(process_one_pdb, **kwargs)
+    # Make sure to name folder containing whole versions with _whole at the end
+    process_func = partial(process_one_pdb, input_folder=input_folder, input_folder_whole=input_folder.replace('not_whole', 'whole'), **kwargs)
+    # process_func(os.listdir(input_folder)[0])
     unordered_results = p_umap(
         process_func,
-        [os.path.join(input_folder, file) for file in os.listdir(input_folder)],
+        [file for file in os.listdir(input_folder)],
         num_cpus=num_workers)
 
     frameid_to_results = {result['frame_id']: result for result in unordered_results}
