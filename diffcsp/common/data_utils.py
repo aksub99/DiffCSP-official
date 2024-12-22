@@ -445,7 +445,7 @@ def get_bead_bond_edges(mol, cg_beads):
     atom_to_bead = {}
     for bead_idx, bead_atoms in enumerate(cg_beads):
         for atom_idx in bead_atoms:
-            atom_to_bead[atom_idx] = bead_idx
+            atom_to_bead[atom_idx.item()] = bead_idx
 
     for bond in mol.GetBonds():
         start, end = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
@@ -550,7 +550,7 @@ def calculate_bead_frac_coords(frac_coords: torch.Tensor, cg_beads: dict, dist_f
     # Stack all bead fractional coordinates into a tensor
     return torch.vstack(bead_frac_coords)
 
-def build_bonded_crystal_graph(crystal, pdb_whole_filepath, smiles, num_mols, RemoveHs=True):
+def build_bonded_crystal_graph(crystal, pdb_whole_filepath, smiles, num_mols, scale, RemoveHs=True):
     frac_coords = crystal.frac_coords
     cart_coords = crystal.cart_coords
     atom_types = torch.tensor(crystal.atomic_numbers)
@@ -2202,7 +2202,8 @@ if __name__ == '__main__':
     # print("\nBead Fractional Coordinates (Intrinsic Mean):", bead_frac_coords)
 
     # Test parameters
-    pdb_filepath = "/home/gridsan/sakshay/experiments/flowmm/y6_5_frames/train/frame0.pdb"
+    pdb_filepath = "/home/gridsan/sakshay/experiments/flowmm/y6_5_frames_not_whole/train/frame0.pdb"
+    pdb_whole_filepath = "/home/gridsan/sakshay/experiments/flowmm/y6_5_frames_whole/train/frame0.pdb"
     smiles = "CCCCC(CC)Cn1c2c3sc(C=C4C(=O)c5cc(F)c(F)cc5C4=C(C#N)C#N)c(CCCCCCCCCCC)c3sc2c2c3nsnc3c3c4sc5c(CCCCCCCCCCC)c(C=C6C(=O)c7cc(F)c(F)cc7C6=C(C#N)C#N)sc5c4n(CC(CC)CCCC)c3c21"
     num_mols = 5
     scale = 'dual'
@@ -2213,10 +2214,9 @@ if __name__ == '__main__':
     # Call the function
     result = build_bonded_crystal_graph(
         crystal=crystal,
-        pdb_filepath=pdb_filepath,
+        pdb_whole_filepath=pdb_whole_filepath,
         smiles=smiles,
         num_mols=num_mols,
         scale=scale,
         RemoveHs=True
     )
-    import pdb; pdb.set_trace()
