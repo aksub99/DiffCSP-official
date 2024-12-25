@@ -36,6 +36,27 @@ class DatasetPDBFiles(Dataset):
     def __getitem__(self, index):
         data_dict = self.cached_data[index]
 
+        if self.scale == 'dual':
+            (frac_coords, atom_types, lengths, angles, atom_features, edge_index, edge_attr, bead_features, bead_edge_index, bead_edge_attr, bead_frac_coords, cg_beads, num_atoms) = data_dict['graph_arrays']
+            data = Data(
+                frac_coords=torch.Tensor(frac_coords),
+                atom_types=torch.LongTensor(atom_types),
+                lengths=torch.Tensor(lengths).view(1, -1),
+                angles=torch.Tensor(angles).view(1, -1),
+                num_atoms=num_atoms,
+                num_nodes=num_atoms,  # special attribute used for batching in pytorch geometric
+                atom_features=torch.FloatTensor(atom_features.float()),
+                edge_index=torch.LongTensor(edge_index),
+                edge_attr=torch.Tensor(edge_attr),
+                bead_features=torch.FloatTensor(bead_features.float()),
+                bead_edge_index=torch.LongTensor(bead_edge_index),
+                bead_edge_attr=torch.Tensor(bead_edge_attr),
+                bead_frac_coords=torch.Tensor(bead_frac_coords),
+                cg_beads=torch.LongTensor(cg_beads),
+                y=torch.Tensor(data_dict[self.prop]).view(1, -1)
+            )
+            return data
+
         (frac_coords, atom_types, lengths, angles, atom_features, edge_index, edge_attr, num_atoms) = data_dict['graph_arrays']
 
         # atom_coords are fractional coordinates

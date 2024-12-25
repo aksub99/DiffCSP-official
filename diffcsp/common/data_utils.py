@@ -597,7 +597,7 @@ def build_bonded_crystal_graph(crystal, pdb_whole_filepath, smiles, num_mols, sc
 
         # Calculate bead fractional coordinates using the Fréchet mean
         bead_frac_coords = calculate_bead_frac_coords(frac_coords, cg_beads, dist)
-        return frac_coords, atom_types, lengths, angles, atom_features, edge_index, edge_attr, bead_features, bead_edge_index, bead_edge_attr, bead_frac_coords, num_atoms
+        return frac_coords, atom_types, lengths, angles, atom_features, edge_index, edge_attr, bead_features, bead_edge_index, bead_edge_attr, bead_frac_coords, cg_beads, num_atoms
 
     return frac_coords, atom_types, lengths, angles, atom_features, edge_index, edge_attr, num_atoms
 
@@ -1732,9 +1732,9 @@ def process_one_pdb(filename, input_folder, input_folder_whole, scale, **kwargs)
     }
     return result_dict
 
-def preprocess_pdbs(input_folder, num_workers, **kwargs):
+def preprocess_pdbs(input_folder, num_workers, scale, **kwargs):
     # Make sure to name folder containing whole versions with _whole at the end
-    process_func = partial(process_one_pdb, input_folder=input_folder, input_folder_whole=input_folder.replace('not_whole', 'whole'), **kwargs)
+    process_func = partial(process_one_pdb, input_folder=input_folder, input_folder_whole=input_folder.replace('not_whole', 'whole'), scale=scale, **kwargs)
     # process_func(os.listdir(input_folder)[0])
     unordered_results = p_umap(
         process_func,
