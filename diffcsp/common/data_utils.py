@@ -592,7 +592,7 @@ def build_bonded_crystal_graph(crystal, pdb_whole_filepath, smiles, num_mols, sc
 
         # Calculate bead fractional coordinates using the Fréchet mean
         bead_frac_coords = calculate_bead_frac_coords(frac_coords, cg_beads, dist)
-        return frac_coords, atom_types, lengths, angles, atom_features, edge_index, edge_attr, bead_features, bead_edge_index, bead_edge_attr, bead_frac_coords, num_atoms
+        return frac_coords, atom_types, lengths, angles, atom_features, edge_index, edge_attr, bead_features, bead_edge_index, bead_edge_attr, bead_frac_coords, cg_beads, num_atoms
 
     return frac_coords, atom_types, lengths, angles, atom_features, edge_index, edge_attr, num_atoms
 
