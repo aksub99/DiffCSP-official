@@ -14,6 +14,7 @@ from pymatgen.core.lattice import Lattice
 from pymatgen.analysis.graphs import StructureGraph
 from pymatgen.analysis import local_env
 
+from ovito.data import DataCollection, NearestNeighborFinder
 # from flowmm.rfm.manifolds.flat_torus import FlatTorus01
 
 from networkx.algorithms.components import is_connected
@@ -794,61 +795,68 @@ def repeat_blocks(
     res = id_ar.cumsum(0)
     return res
 
+def radius_graph_pbc_ovito(pos, lengths, angles, natoms, radius, max_num_neighbors_threshold, device, lattices=None):
+    # Convert all torch tensors to CPU and numpy because OVITO is not compatible with torch tensors
+    pos = pos.cpu().numpy()
+    lengths = lengths.cpu().numpy()
+    angles = angles.cpu().numpy()
+    natoms = natoms.cpu().numpy()
+    if lattices is not None:
+        lattices = lattices.cpu().numpy()
+    
+    edge_indices = []
+    unit_cells = []
+    num_neighbors_per_image = []
 
-# def knn_frac_neighbors(frac_coords, num_atoms, max_neighbors, lattices, node2graph):
-#     # Total number of atoms
-#     total_atoms = num_atoms.item()
+    start_idx = 0
+    for i in range(len(natoms)):
+        # Create a new OVITO DataCollection for each structure
+        data = DataCollection()
+        
+        if lattices is not None:
+            cell_matrix = lattices[i]
+            # Lattices is of shape (3, 3). We need to add a column of zeros to it at the end
+            cell_matrix = np.hstack([cell_matrix, np.zeros((3, 1))])  # Add zero column for OVITO
+            data.create_cell(cell_matrix, pbc=(True, True, True))
+        else:
+            raise NotImplementedError("lattices is None")
 
-#     # Generate all possible pairs of atom indices
-#     index1, index2 = torch.cartesian_prod(
-#         torch.arange(total_atoms, device=frac_coords.device),
-#         torch.arange(total_atoms, device=frac_coords.device),
-#     ).T
+        # Create particles
+        particles = data.create_particles(count=natoms[i])
+        particles.create_property('Position', data=pos[start_idx : start_idx + natoms[i]].tolist())
 
-#     # Exclude self-loops (atom paired with itself)
-#     mask_not_self = index1 != index2
-#     index1 = index1[mask_not_self]
-#     index2 = index2[mask_not_self]
+        # Use the NearestNeighborFinder to find neighbors within the radius
+        finder = NearestNeighborFinder(max_num_neighbors_threshold, data)
+        edge_index_i = []
+        unit_cell_i = []
 
-#     # Compute fractional differences using logmap for periodic boundaries
-#     frac_diff = FlatTorus01.logmap(frac_coords[index1], frac_coords[index2])
+        idx, displacement = finder.find_all()
+        for a in range(len(idx)):
+            for b in range(len(idx[a])):
+                edge_index_i.append((idx[a][b], a))
+                unit_cell_i.append(displacement[a][b])
+        
+        # Convert results to numpy arrays
+        lattice_distances = np.linalg.norm(lattices[i], axis=1)
+        edge_index_i = np.array(edge_index_i).T  # Shape: (2, num_edges)
+        unit_cell_i = np.floor_divide(np.array(unit_cell_i) + pos[start_idx: start_idx + natoms[i]], lattice_distances)  # Shape: (num_edges, 3)
+        num_neighbors_image_i = edge_index_i.shape[1]  # Number of neighbors for this image
 
-#     # _lattices = self._convert_lin_to_lattice(lattices)
-#     node2graph = node2graph[index1]
-#     lattice_nodes = lattices[node2graph]
-#     # Convert fractional differences to Cartesian distances
-#     cart_diff = torch.einsum("bi,bij->bj", frac_diff, lattice_nodes)
-#     # cart_diff = torch.einsum('ij,kj->ki', lattice, frac_diff)  # Fractional to Cartesian
-#     distances = torch.norm(cart_diff, dim=1)  # Euclidean distances
+        # Store results
+        edge_indices.append(edge_index_i)
+        unit_cells.append(unit_cell_i)
+        num_neighbors_per_image.append(num_neighbors_image_i)
+        start_idx += natoms[i]
+    
+    # Convert to PyTorch tensors for consistency with the original function
+    edge_index = torch.from_numpy(np.hstack(edge_indices)).to(device)  # Combine all edge indices
+    unit_cell = torch.from_numpy(np.vstack(unit_cells)).to(device)  # Combine all unit cell displacements
+    num_neighbors_image = torch.tensor(num_neighbors_per_image).to(device)  # Combine all neighbor counts
 
-#     # Find the nearest neighbors for each atom
-#     edge_index = []
-#     frac_diff_neighbors = []
-
-#     for atom_idx in range(total_atoms):
-#         # Select distances for the current atom
-#         mask_current = index1 == atom_idx
-#         current_distances = distances[mask_current]
-#         current_pairs = index2[mask_current]  # Neighbor indices
-#         current_diffs = frac_diff[mask_current]  # Neighbor fractional differences
-
-#         # Sort by distance and select the top `max_neighbors`
-#         sorted_indices = torch.argsort(current_distances)
-#         selected_indices = sorted_indices[:max_neighbors]
-
-#         # Add edges and fractional differences for selected neighbors
-#         edge_index.append(torch.stack((current_pairs[selected_indices], torch.full_like(selected_indices, atom_idx))))
-#         frac_diff_neighbors.append(current_diffs[selected_indices])
-
-#     # Concatenate results for all atoms
-#     edge_index = torch.cat(edge_index, dim=1)
-#     frac_diff_neighbors = torch.cat(frac_diff_neighbors, dim=0)
-
-#     return edge_index, frac_diff_neighbors
-
+    return edge_index, unit_cell, num_neighbors_image
+ 
 
 def radius_graph_pbc(pos, lengths, angles, natoms, radius, max_num_neighbors_threshold, device, lattices=None):
-    
     # print(f"Before nn search: {torch.cuda.memory_allocated()/10**9} / {torch.cuda.max_memory_allocated()/10**9}")
     # print("Before graph creation: ", torch.cuda.memory_reserved(), torch.cuda.memory_allocated())
     # device = pos.device
@@ -860,22 +868,21 @@ def radius_graph_pbc(pos, lengths, angles, natoms, radius, max_num_neighbors_thr
     # position of the atoms
     atom_pos = pos
 
-
     # Before computing the pairwise distances between atoms, first create a list of atom indices to compare for the entire batch
-    num_atoms_per_image = natoms
-    num_atoms_per_image_sqr = (num_atoms_per_image**2).long()
+    num_atoms_per_image = natoms # [505, 505, 505, 505]
+    num_atoms_per_image_sqr = (num_atoms_per_image**2).long() # [505*505, 505*505, 505*505, 505*505]
 
     # index offset between images
     index_offset = (
         torch.cumsum(num_atoms_per_image, dim=0) - num_atoms_per_image
-    )
+    ) # [0, 505, 1010, 1515]
 
     index_offset_expand = torch.repeat_interleave(
         index_offset, num_atoms_per_image_sqr
-    )
+    ) # [0...0, 505...505, 1010...1010, 1515...1515] each repeated 505*505 times
     num_atoms_per_image_expand = torch.repeat_interleave(
         num_atoms_per_image, num_atoms_per_image_sqr
-    )
+    ) # [505...505, 505...505, 505...505, 505...505] each repeated 505*505 times
 
     # Compute a tensor containing sequences of numbers that range from 0 to num_atoms_per_image_sqr for each image
     # that is used to compute indices for the pairs of atoms. This is a very convoluted way to implement
@@ -970,7 +977,7 @@ def radius_graph_pbc(pos, lengths, angles, natoms, radius, max_num_neighbors_thr
     # Add the PBC offsets for the second atom
     pos2 = pos2 + pbc_offsets_per_atom
 
-#     # Compute the squared distance between atoms
+    # Compute the squared distance between atoms
     atom_distance_sqr = torch.sum((pos1 - pos2) ** 2, dim=1)
     atom_distance_sqr = atom_distance_sqr.view(-1)
 
@@ -1029,6 +1036,7 @@ def radius_graph_pbc(pos, lengths, angles, natoms, radius, max_num_neighbors_thr
     edge_index = torch.stack((index2, index1))
     # print("After graph creation: ", torch.cuda.memory_reserved(), torch.cuda.memory_allocated())
     # print(f"After nn search: {torch.cuda.memory_allocated()/10**9} / {torch.cuda.max_memory_allocated()/10**9}")
+    # edge_index is [2, num_edges], unit_cell is [num_edges, 3], num_neighbors_image is [batch_size, num_edges_per_batch]
     return edge_index, unit_cell, num_neighbors_image
 
 
@@ -1667,3 +1675,62 @@ class StandardScaler:
             np.isnan(transformed_with_nan), self.replace_nan_token, transformed_with_nan)
 
         return transformed_with_none
+
+def generate_lattice_matrix(lengths, angles):
+    """
+    Generate a 3x3 lattice matrix from lengths and angles.
+    """
+    a, b, c = lengths
+    alpha, beta, gamma = np.radians(angles)
+    lattice = np.zeros((3, 3))
+    lattice[0, 0] = a
+    lattice[1, 0] = b * np.cos(gamma)
+    lattice[1, 1] = b * np.sin(gamma)
+    lattice[2, 0] = c * np.cos(beta)
+    lattice[2, 1] = c * (np.cos(alpha) - np.cos(beta) * np.cos(gamma)) / np.sin(gamma)
+    lattice[2, 2] = np.sqrt(c**2 - lattice[2, 0]**2 - lattice[2, 1]**2)
+    return lattice
+
+def test_radius_graph_pbc():
+    """
+    Test to ensure radius_graph_pbc and radius_graph_pbc_ovito return the same results.
+    """
+    # Synthetic input data
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    # Example batch of 2 cells with 5 atoms each
+    # pos = torch.rand((10, 3), device=device, dtype=torch.float16) * 10.0  # Positions of atoms
+    pos = torch.tensor([[1, 0, 0], [3, 0, 0], [5, 0, 0], [7, 0, 0], [10, 0, 0], 
+                        [0.5, 0, 0], [7, 0, 0], [8, 0, 0], [9, 0, 0], [10, 0, 0]], device=device, dtype=torch.float16)
+    lengths = torch.tensor([[10.0, 10.0, 10.0], [12.0, 12.0, 12.0]], device=device)  # Lattice lengths
+    angles = torch.tensor([[90.0, 90.0, 90.0], [90.0, 90.0, 90.0]], device=device)  # Lattice angles
+    natoms = torch.tensor([5, 5], device=device, dtype=torch.int64)  # Number of atoms in each batch
+    radius = 5.0
+    max_num_neighbors_threshold = 1
+
+    # Generate lattice matrices (3x3 matrices)
+    lattices = torch.tensor(
+        [generate_lattice_matrix(lengths[i].cpu().numpy(), angles[i].cpu().numpy()) for i in range(len(lengths))],
+        device=device,
+        dtype=torch.float32
+    )
+
+    # Call both functions
+    edge_index1, unit_cell1, num_neighbors_image1 = radius_graph_pbc(
+        pos, lengths, angles, natoms, radius, max_num_neighbors_threshold, device, lattices
+    )
+    edge_index2, unit_cell2, num_neighbors_image2 = radius_graph_pbc_ovito(
+        pos, lengths, angles, natoms, radius, max_num_neighbors_threshold, device, lattices
+    )
+ 
+    # Compare results
+    assert torch.allclose(edge_index1, edge_index2, rtol=1e-5, atol=1e-8), "edge_index mismatch"
+    assert torch.allclose(unit_cell1, unit_cell2, rtol=1e-5, atol=1e-8), "unit_cell mismatch"
+    assert torch.allclose(num_neighbors_image1, num_neighbors_image2, rtol=1e-5, atol=1e-8), "num_neighbors_image mismatch"
+    
+    print("Test passed: Both functions return the same results.")
+
+if __name__ == '__main__':
+    test_radius_graph_pbc()
+    # mol = make_rdkit_mol('/home/gridsan/sakshay/experiments/flowmm/y6_100_frames_not_whole/train/frame0.pdb', 'CCCCC(CC)Cn1c2c3sc(C=C4C(=O)c5cc(F)c(F)cc5C4=C(C#N)C#N)c(CCCCCCCCCCC)c3sc2c2c3nsnc3c3c4sc5c(CCCCCCCCCCC)c(C=C6C(=O)c7cc(F)c(F)cc7C6=C(C#N)C#N)sc5c4n(CC(CC)CCCC)c3c21', RemoveHs=False)
+    # import pdb; pdb.set_trace()
