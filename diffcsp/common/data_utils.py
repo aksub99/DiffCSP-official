@@ -251,12 +251,12 @@ def featurize_atoms(mol):
     for idx, atom in enumerate(mol.GetAtoms()):
         features = [
             safe_index_("atomic_num", atom.GetAtomicNum()),
-            safe_index_("chirality", str(atom.GetChiralTag())),
+            # safe_index_("chirality", str(atom.GetChiralTag())),
             safe_index_("degree", atom.GetTotalDegree()),
             safe_index_("numring", ringinfo.NumAtomRings(idx)),
             safe_index_("implicit_valence", atom.GetImplicitValence()),
             safe_index_("formal_charge", atom.GetFormalCharge()),
-            # safe_index_("numH", atom.GetTotalNumHs()),
+            safe_index_("numH", atom.GetTotalNumHs()),
             safe_index_("hybridization", str(atom.GetHybridization())),
             safe_index_("is_aromatic", atom.GetIsAromatic()),
             safe_index_("is_in_ring5", ringinfo.IsAtomInRingOfSize(idx, 5)),
@@ -1732,5 +1732,3 @@ def test_radius_graph_pbc():
 
 if __name__ == '__main__':
     test_radius_graph_pbc()
-    # mol = make_rdkit_mol('/home/gridsan/sakshay/experiments/flowmm/y6_100_frames_not_whole/train/frame0.pdb', 'CCCCC(CC)Cn1c2c3sc(C=C4C(=O)c5cc(F)c(F)cc5C4=C(C#N)C#N)c(CCCCCCCCCCC)c3sc2c2c3nsnc3c3c4sc5c(CCCCCCCCCCC)c(C=C6C(=O)c7cc(F)c(F)cc7C6=C(C#N)C#N)sc5c4n(CC(CC)CCCC)c3c21', RemoveHs=False)
-    # import pdb; pdb.set_trace()
