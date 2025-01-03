@@ -313,12 +313,6 @@ def build_bonded_crystal_graph(crystal, pdb_whole_filepath, smiles, num_mols, Re
     
     atom_types = np.array(atom_types)
 
-    if RemoveHs:
-        heavy_atoms_mask = atom_types != 1
-        atom_types = atom_types[heavy_atoms_mask]
-        frac_coords = frac_coords[heavy_atoms_mask]
-        cart_coords = cart_coords[heavy_atoms_mask]
-
     lengths, angles = np.array(lengths), np.array(angles)
     num_atoms = atom_types.shape[0]
 
@@ -798,8 +792,8 @@ def repeat_blocks(
 def radius_graph_pbc_ovito(pos, lengths, angles, natoms, radius, max_num_neighbors_threshold, device, lattices=None):
     # Convert all torch tensors to CPU and numpy because OVITO is not compatible with torch tensors
     pos = pos.cpu().numpy()
-    lengths = lengths.cpu().numpy()
-    angles = angles.cpu().numpy()
+    # lengths = lengths.cpu().numpy()
+    # angles = angles.cpu().numpy()
     natoms = natoms.cpu().numpy()
     if lattices is not None:
         lattices = lattices.cpu().numpy()
@@ -839,7 +833,8 @@ def radius_graph_pbc_ovito(pos, lengths, angles, natoms, radius, max_num_neighbo
         # Convert results to numpy arrays
         lattice_distances = np.linalg.norm(lattices[i], axis=1)
         edge_index_i = np.array(edge_index_i).T  # Shape: (2, num_edges)
-        unit_cell_i = np.floor_divide(np.array(unit_cell_i) + pos[start_idx: start_idx + natoms[i]], lattice_distances)  # Shape: (num_edges, 3)
+        pos_repeated = np.repeat(pos[start_idx: start_idx + natoms[i]], max_num_neighbors_threshold, axis=0)
+        unit_cell_i = np.floor_divide(np.array(unit_cell_i) + pos_repeated, lattice_distances)  # Shape: (num_edges, 3)
         num_neighbors_image_i = edge_index_i.shape[1]  # Number of neighbors for this image
 
         # Store results
@@ -1458,34 +1453,135 @@ def get_scaler_from_data_list(data_list, key):
     scaler.fit(targets)
     return scaler
 
-def process_one_pdb(filename, input_folder, input_folder_whole, **kwargs):
-    file_path = os.path.join(input_folder, filename)
-    file_path_whole = os.path.join(input_folder_whole, filename)
-    crystal = build_crystal_from_pdb(file_path)
+# def process_one_pdb(filename, input_folder, input_folder_whole, **kwargs):
+#     file_path = os.path.join(input_folder, filename)
+#     file_path_whole = os.path.join(input_folder_whole, filename)
+#     crystal = build_crystal_from_pdb(file_path)
 
-    # Rdkit molecule objects are made with pdb version where molecules are made whole at pbc boundaries
-    # TODO: Modify later to directly use mdtraj to do unwrapping
-    graph_arrays = build_bonded_crystal_graph(crystal, pdb_whole_filepath=file_path_whole, smiles=kwargs['smiles'], num_mols=kwargs['num_mols'])
-    result_dict = {
-        'frame_id': int(file_path.split('.')[0][-1]),
-        'file_path': file_path,
-        'graph_arrays': graph_arrays,
-    }
-    return result_dict
+#     # Rdkit molecule objects are made with pdb version where molecules are made whole at pbc boundaries
+#     # TODO: Modify later to directly use mdtraj to do unwrapping
+#     graph_arrays = build_bonded_crystal_graph(crystal, pdb_whole_filepath=file_path_whole, smiles=kwargs['smiles'], num_mols=kwargs['num_mols'])
+#     result_dict = {
+#         'frame_id': int(file_path.split('.')[0][-1]),
+#         'file_path': file_path,
+#         'graph_arrays': graph_arrays,
+#     }
+#     return result_dict
 
-def preprocess_pdbs(input_folder, num_workers, **kwargs):
-    # Make sure to name folder containing whole versions with _whole at the end
-    process_func = partial(process_one_pdb, input_folder=input_folder, input_folder_whole=input_folder.replace('not_whole', 'whole'), **kwargs)
-    # process_func(os.listdir(input_folder)[0])
-    unordered_results = p_umap(
-        process_func,
-        [file for file in os.listdir(input_folder)],
-        num_cpus=num_workers)
+# def preprocess_pdbs(input_folder, num_workers, **kwargs):
+#     # Make sure to name folder containing whole versions with _whole at the end
+#     process_func = partial(process_one_pdb, input_folder=input_folder, input_folder_whole=input_folder.replace('not_whole', 'whole'), **kwargs)
+#     unordered_results = [process_func(file) for file in os.listdir(input_folder)]
+    
+#     # # process_func(os.listdir(input_folder)[0])
+#     # unordered_results = p_umap(
+#     #     process_func,
+#     #     [file for file in os.listdir(input_folder)],
+#     #     num_cpus=num_workers)
 
+#     frameid_to_results = {result['frame_id']: result for result in unordered_results}
+#     ordered_results = [frameid_to_results[int(file.split('.')[0][-1])] for file in os.listdir(input_folder)]
+#     return ordered_results
+
+def preprocess_pdbs(input_folder, num_workers, same=False, **kwargs):
+    """
+    Preprocess PDB files and build graph data.
+    If `same=True`, reuse shared computations to optimize performance.
+    """
+    input_folder_whole = input_folder.replace('not_whole', 'whole')
+
+    if same:
+        # Process the first PDB file to extract shared information
+        first_file = os.listdir(input_folder)[0]
+        shared_file_path = os.path.join(input_folder, first_file)
+        shared_file_whole = os.path.join(input_folder_whole, first_file)
+
+        # Build the crystal and graph for the first file
+        shared_crystal = build_crystal_from_pdb(shared_file_path)
+        shared_graph_data = build_bonded_crystal_graph(
+            shared_crystal,
+            pdb_whole_filepath=shared_file_whole,
+            smiles=kwargs['smiles'],
+            num_mols=kwargs['num_mols']
+        )
+
+        # Extract shared data components
+        shared_atom_types = shared_graph_data[1]
+        shared_lengths = shared_graph_data[2]
+        shared_angles = shared_graph_data[3]
+        shared_atom_features = shared_graph_data[4]
+        shared_edge_index = shared_graph_data[5]
+        shared_edge_attr = shared_graph_data[6]
+        shared_num_atoms = shared_graph_data[7]
+
+        # Precompute lattice matrix
+        shared_lattice_matrix = lattice_params_to_matrix(*shared_lengths, *shared_angles)
+
+        def process_one_shared(filename, RemoveHs=True):
+            file_path = os.path.join(input_folder, filename)
+            crystal = build_crystal_from_pdb(file_path)
+            frac_coords = crystal.frac_coords  # Only the fractional coordinates change
+            atom_types = torch.tensor(crystal.atomic_numbers)
+    
+            if RemoveHs:
+                heavy_atoms_mask = (atom_types != 1)
+                frac_coords = frac_coords[heavy_atoms_mask]
+
+            return {
+                'frame_id': int(file_path.split('.')[0][-1]),
+                'file_path': file_path,
+                'graph_arrays': (
+                    frac_coords,
+                    shared_atom_types,
+                    shared_lengths,
+                    shared_angles,
+                    shared_atom_features,
+                    shared_edge_index,
+                    shared_edge_attr,
+                    shared_num_atoms,
+                ),
+            }
+
+        process_one_shared = partial(process_one_shared, RemoveHs=True)
+        # Parallelize processing for all files using shared computation
+        unordered_results = p_umap(
+            process_one_shared,
+            [file for file in os.listdir(input_folder)],
+            num_cpus=num_workers
+        )
+
+    else:
+        # Process each PDB file independently
+        def process_one(filename):
+            file_path = os.path.join(input_folder, filename)
+            file_path_whole = os.path.join(input_folder_whole, filename)
+            crystal = build_crystal_from_pdb(file_path)
+            graph_arrays = build_bonded_crystal_graph(
+                crystal,
+                pdb_whole_filepath=file_path_whole,
+                smiles=kwargs['smiles'],
+                num_mols=kwargs['num_mols']
+            )
+            return {
+                'frame_id': int(file_path.split('.')[0][-1]),
+                'file_path': file_path,
+                'graph_arrays': graph_arrays,
+            }
+
+        # Parallelize processing for all files
+        unordered_results = p_umap(
+            process_one,
+            [file for file in os.listdir(input_folder)],
+            num_cpus=num_workers
+        )
+
+    # Order results by frame_id
     frameid_to_results = {result['frame_id']: result for result in unordered_results}
-    ordered_results = [frameid_to_results[int(file.split('.')[0][-1])] for file in os.listdir(input_folder)]
+    ordered_results = [
+        frameid_to_results[int(file.split('.')[0][-1])]
+        for file in os.listdir(input_folder)
+    ]
     return ordered_results
-
 
 def process_one(row, niggli, primitive, graph_method, prop_list, use_space_group = False, tol=0.01):
     crystal_str = row['cif']

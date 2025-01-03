@@ -25,7 +25,7 @@ class DatasetPDBFiles(Dataset):
         if os.path.exists(save_path):
             self.cached_data = torch.load(save_path)
         else:
-            cached_data = preprocess_pdbs(self.folder_path, preprocess_workers, smiles=kwargs['smiles'], num_mols=kwargs['num_mols'])
+            cached_data = preprocess_pdbs(self.folder_path, preprocess_workers, smiles=kwargs['smiles'], num_mols=kwargs['num_mols'], same=kwargs['same'])
             torch.save(cached_data, save_path)
             self.cached_data = cached_data
 
