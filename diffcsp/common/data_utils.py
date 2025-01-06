@@ -230,7 +230,7 @@ CrystalNN = local_env.CrystalNN(
 
 
 def make_rdkit_mol(pdb_filepath, smiles, RemoveHs=True):
-    raw_mol = Chem.MolFromPDBFile(pdb_filepath)
+    raw_mol = Chem.MolFromPDBFile(pdb_filepath, removeHs=RemoveHs)
     mol = Chem.Mol(raw_mol)
 
     template = Chem.MolFromSmiles(smiles)
