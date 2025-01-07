@@ -345,7 +345,7 @@ CrystalNN = local_env.CrystalNN(
     distance_cutoffs=None, x_diff_weight=-1, porous_adjustment=False)
 
 
-def make_rdkit_mol(pdb_filepath, smiles, RemoveHs=True):
+def make_rdkit_mol(pdb_filepath, smiles, RemoveHs=False):
     raw_mol = Chem.MolFromPDBFile(pdb_filepath, removeHs=RemoveHs)
     mol = Chem.Mol(raw_mol)
 
@@ -550,7 +550,7 @@ def calculate_bead_frac_coords(frac_coords: torch.Tensor, cg_beads: dict, dist_f
     # Stack all bead fractional coordinates into a tensor
     return torch.vstack(bead_frac_coords)
 
-def build_bonded_crystal_graph(crystal, pdb_whole_filepath, smiles, num_mols, scale, RemoveHs=True):
+def build_bonded_crystal_graph(crystal, pdb_whole_filepath, smiles, num_mols, scale, RemoveHs=False):
     frac_coords = crystal.frac_coords
     cart_coords = crystal.cart_coords
     atom_types = torch.tensor(crystal.atomic_numbers)
@@ -592,7 +592,7 @@ def build_bonded_crystal_graph(crystal, pdb_whole_filepath, smiles, num_mols, sc
 
         # Calculate bead fractional coordinates using the Fréchet mean
         bead_frac_coords = calculate_bead_frac_coords(frac_coords, cg_beads, dist)
-        return frac_coords, atom_types, lengths, angles, atom_features, edge_index, edge_attr, bead_features, bead_edge_index, bead_edge_attr, bead_frac_coords, cg_beads, num_atoms
+        return (frac_coords, atom_types, lengths, angles, atom_features, edge_index, edge_attr), (bead_features, bead_edge_index, bead_edge_attr, bead_frac_coords, cg_beads), num_atoms
 
     return frac_coords, atom_types, lengths, angles, atom_features, edge_index, edge_attr, num_atoms
 
@@ -1784,7 +1784,7 @@ def preprocess_pdbs(input_folder, num_workers, same=False, **kwargs):
         # Precompute lattice matrix
         shared_lattice_matrix = lattice_params_to_matrix(*shared_lengths, *shared_angles)
 
-        def process_one_shared(filename, RemoveHs=True):
+        def process_one_shared(filename, RemoveHs=False):
             file_path = os.path.join(input_folder, filename)
             crystal = build_crystal_from_pdb(file_path)
             frac_coords = crystal.frac_coords  # Only the fractional coordinates change
@@ -1809,7 +1809,7 @@ def preprocess_pdbs(input_folder, num_workers, same=False, **kwargs):
                 ),
             }
 
-        process_one_shared = partial(process_one_shared, RemoveHs=True)
+        process_one_shared = partial(process_one_shared, RemoveHs=False)
         # Parallelize processing for all files using shared computation
         unordered_results = p_umap(
             process_one_shared,
