@@ -587,12 +587,13 @@ def build_bonded_crystal_graph(crystal, pdb_whole_filepath, smiles, num_mols, sc
 
     if scale == 'dual':
         _, cg_beads = get_fragment_atom_mapping_with_smarts(fragments, mol)
+        num_beads = len(cg_beads)
         bead_features = featurize_beads(mol, cg_beads)
         bead_edge_index, bead_edge_attr = get_bead_bond_edges(mol, cg_beads)
 
         # Calculate bead fractional coordinates using the Fréchet mean
         bead_frac_coords = calculate_bead_frac_coords(frac_coords, cg_beads, dist)
-        return (frac_coords, atom_types, lengths, angles, atom_features, edge_index, edge_attr), (bead_features, bead_edge_index, bead_edge_attr, bead_frac_coords, cg_beads), num_atoms
+        return (frac_coords, atom_types, lengths, angles, atom_features, edge_index, edge_attr, num_atoms), (bead_frac_coords, bead_features, bead_edge_index, bead_edge_attr, num_beads, cg_beads)
 
     return frac_coords, atom_types, lengths, angles, atom_features, edge_index, edge_attr, num_atoms
 
@@ -1750,7 +1751,7 @@ def get_scaler_from_data_list(data_list, key):
 #     ordered_results = [frameid_to_results[int(file.split('.')[0][-1])] for file in os.listdir(input_folder)]
 #     return ordered_results
 
-def preprocess_pdbs(input_folder, num_workers, same=False, **kwargs):
+def preprocess_pdbs(input_folder, num_workers, same=False, scale='dual', **kwargs):
     """
     Preprocess PDB files and build graph data.
     If `same=True`, reuse shared computations to optimize performance.
@@ -1772,42 +1773,88 @@ def preprocess_pdbs(input_folder, num_workers, same=False, **kwargs):
             num_mols=kwargs['num_mols']
         )
 
-        # Extract shared data components
-        shared_atom_types = shared_graph_data[1]
-        shared_lengths = shared_graph_data[2]
-        shared_angles = shared_graph_data[3]
-        shared_atom_features = shared_graph_data[4]
-        shared_edge_index = shared_graph_data[5]
-        shared_edge_attr = shared_graph_data[6]
-        shared_num_atoms = shared_graph_data[7]
-
-        # Precompute lattice matrix
-        shared_lattice_matrix = lattice_params_to_matrix(*shared_lengths, *shared_angles)
+        if scale == 'dual':
+            shared_aa_data, shared_cg_data = shared_graph_data
+            shared_atom_types = shared_aa_data[1]
+            shared_lengths = shared_aa_data[2]
+            shared_angles = shared_aa_data[3]
+            shared_atom_features_aa = shared_aa_data[4]
+            shared_edge_index_aa = shared_aa_data[5]
+            shared_edge_attr_aa = shared_aa_data[6]
+            shared_num_atoms_aa = shared_aa_data[7]
+            shared_atom_features_cg = shared_cg_data[1]
+            shared_edge_index_cg = shared_cg_data[2]
+            shared_edge_attr_cg = shared_cg_data[3]
+            shared_num_atoms_cg = shared_cg_data[4]
+            shared_bead_mapping_cg = shared_cg_data[5]
+        else:
+            # Extract shared data components
+            shared_atom_types = shared_graph_data[1]
+            shared_lengths = shared_graph_data[2]
+            shared_angles = shared_graph_data[3]
+            shared_atom_features = shared_graph_data[4]
+            shared_edge_index = shared_graph_data[5]
+            shared_edge_attr = shared_graph_data[6]
+            shared_num_atoms = shared_graph_data[7]
 
         def process_one_shared(filename, RemoveHs=False):
             file_path = os.path.join(input_folder, filename)
             crystal = build_crystal_from_pdb(file_path)
-            frac_coords = crystal.frac_coords  # Only the fractional coordinates change
-            atom_types = torch.tensor(crystal.atomic_numbers)
-    
-            if RemoveHs:
-                heavy_atoms_mask = (atom_types != 1)
-                frac_coords = frac_coords[heavy_atoms_mask]
+            atom_types = torch.tensor(crystal.atomic_numbers)  
 
-            return {
-                'frame_id': int(file_path.split('.')[0][-1]),
-                'file_path': file_path,
-                'graph_arrays': (
-                    frac_coords,
+            if scale == 'dual':
+                frac_coords_aa = crystal.frac_coords
+                if RemoveHs:
+                    heavy_atoms_mask = (atom_types != 1)
+                    frac_coords_aa = frac_coords_aa[heavy_atoms_mask]
+                frac_coords_cg = calculate_bead_frac_coords(frac_coords_aa, shared_bead_mapping_cg, dist)
+
+                graph_arrays_aa = (
+                    frac_coords_aa,
                     shared_atom_types,
                     shared_lengths,
                     shared_angles,
-                    shared_atom_features,
-                    shared_edge_index,
-                    shared_edge_attr,
-                    shared_num_atoms,
-                ),
-            }
+                    shared_atom_features_aa,
+                    shared_edge_index_aa,
+                    shared_edge_attr_aa,
+                    shared_num_atoms_aa,
+                )
+                graph_arrays_cg = (
+                    frac_coords_cg,
+                    shared_atom_types,
+                    shared_lengths,
+                    shared_angles,
+                    shared_atom_features_cg,
+                    shared_edge_index_cg,
+                    shared_edge_attr_cg,
+                    shared_num_atoms_cg,
+                )
+                return {
+                    'frame_id': int(file_path.split('.')[0][-1]),
+                    'file_path': file_path,
+                    'graph_arrays_aa': graph_arrays_aa,
+                    'graph_arrays_cg': graph_arrays_cg,
+                    'bead_mapping': shared_bead_mapping_cg,
+                }
+            else:
+                frac_coords = crystal.frac_coords
+                if RemoveHs:
+                    heavy_atoms_mask = (atom_types != 1)
+                    frac_coords = frac_coords[heavy_atoms_mask]
+                return {
+                    'frame_id': int(file_path.split('.')[0][-1]),
+                    'file_path': file_path,
+                    'graph_arrays': (
+                        frac_coords,
+                        shared_atom_types,
+                        shared_lengths,
+                        shared_angles,
+                        shared_atom_features,
+                        shared_edge_index,
+                        shared_edge_attr,
+                        shared_num_atoms,
+                    ),
+                }
 
         process_one_shared = partial(process_one_shared, RemoveHs=False)
         # Parallelize processing for all files using shared computation
@@ -1829,11 +1876,20 @@ def preprocess_pdbs(input_folder, num_workers, same=False, **kwargs):
                 smiles=kwargs['smiles'],
                 num_mols=kwargs['num_mols']
             )
-            return {
-                'frame_id': int(file_path.split('.')[0][-1]),
-                'file_path': file_path,
-                'graph_arrays': graph_arrays,
-            }
+            if scale == 'dual':
+                graph_arrays_aa, graph_arrays_cg = graph_arrays
+                return {
+                    'frame_id': int(file_path.split('.')[0][-1]),
+                    'file_path': file_path,
+                    'graph_arrays_aa': graph_arrays_aa,
+                    'graph_arrays_cg': graph_arrays_cg,
+                }
+            else:
+                return {
+                    'frame_id': int(file_path.split('.')[0][-1]),
+                    'file_path': file_path,
+                    'graph_arrays': graph_arrays,
+                }
 
         # Parallelize processing for all files
         unordered_results = p_umap(
