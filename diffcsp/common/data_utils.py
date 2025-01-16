@@ -1502,7 +1502,8 @@ def preprocess_pdbs(input_folder, num_workers, same=False, **kwargs):
             shared_crystal,
             pdb_whole_filepath=shared_file_whole,
             smiles=kwargs['smiles'],
-            num_mols=kwargs['num_mols']
+            num_mols=kwargs['num_mols'],
+            RemoveHs=True,
         )
 
         # Extract shared data components
@@ -1542,7 +1543,7 @@ def preprocess_pdbs(input_folder, num_workers, same=False, **kwargs):
                 ),
             }
 
-        process_one_shared = partial(process_one_shared, RemoveHs=False)
+        process_one_shared = partial(process_one_shared, RemoveHs=True)
         # Parallelize processing for all files using shared computation
         unordered_results = p_umap(
             process_one_shared,
@@ -1560,7 +1561,8 @@ def preprocess_pdbs(input_folder, num_workers, same=False, **kwargs):
                 crystal,
                 pdb_whole_filepath=file_path_whole,
                 smiles=kwargs['smiles'],
-                num_mols=kwargs['num_mols']
+                num_mols=kwargs['num_mols'],
+                RemoveHs=True,
             )
             return {
                 'frame_id': int(file_path.split('.')[0][-1]),
