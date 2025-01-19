@@ -79,31 +79,6 @@ class DatasetPDBFiles(Dataset):
                 bead_mapping=torch.LongTensor(bead_mapping),
             )
             
-            # data1 = Data(
-            #     frac_coords=torch.Tensor(frac_coords_aa),
-            #     atom_types=torch.LongTensor(atom_types_aa),
-            #     lengths=torch.Tensor(lengths).view(1, -1),
-            #     angles=torch.Tensor(angles).view(1, -1),
-            #     num_atoms=num_atoms_aa,
-            #     num_nodes=num_atoms_aa,  # special attribute used for batching in pytorch geometric
-            #     atom_features=torch.FloatTensor(atom_features_aa.float()),
-            #     edge_index=torch.LongTensor(edge_index_aa),
-            #     edge_attr=torch.Tensor(edge_attr_aa),
-            # )
-
-            # data2 = Data(
-            #     frac_coords=torch.Tensor(frac_coords_cg),
-            #     atom_types=torch.LongTensor(atom_types_cg),
-            #     lengths=torch.Tensor(lengths).view(1, -1),
-            #     angles=torch.Tensor(angles).view(1, -1),
-            #     num_atoms=num_atoms_cg,
-            #     num_nodes=num_atoms_cg,  # special attribute used for batching in pytorch geometric
-            #     atom_features=torch.FloatTensor(atom_features_cg.float()),
-            #     edge_index=torch.LongTensor(edge_index_cg),
-            #     edge_attr=torch.Tensor(edge_attr_cg),
-            # )
-
-            # return data1, data2, torch.LongTensor(bead_mapping)
             return pair_data
         else:
             (frac_coords, atom_types, lengths, angles, atom_features, edge_index, edge_attr, num_atoms) = data_dict['graph_arrays']
@@ -123,71 +98,6 @@ class DatasetPDBFiles(Dataset):
 
     def __repr__(self) -> str:
         return f"DatasetPDBFiles({self.folder_path=})"
-
-# class DatasetPDBFiles(Dataset):
-#     def __init__(self, name: ValueNode, folder_path: ValueNode, prop: ValueNode, preprocess_workers: ValueNode, lattice_scale_method: ValueNode, save_path: ValueNode, scale: ValueNode, **kwargs):
-#         super().__init__()
-#         self.folder_path = folder_path
-#         self.prop = prop
-#         self.scale=scale
-#         self.preprocess_pdbs(save_path, preprocess_workers, scale, **kwargs)
-#         add_scaled_lattice_prop(self.cached_data, lattice_scale_method)
-
-#     def preprocess_pdbs(self, save_path, preprocess_workers, scale, **kwargs):
-#         if os.path.exists(save_path):
-#             self.cached_data = torch.load(save_path)
-#         else:
-#             cached_data = preprocess_pdbs(self.folder_path, preprocess_workers, smiles=kwargs['smiles'], num_mols=kwargs['num_mols'], same=kwargs['same'])
-#             torch.save(cached_data, save_path)
-#             self.cached_data = cached_data
-
-#     def __len__(self) -> int:
-#         return len(self.cached_data)
-
-#     def __getitem__(self, index):
-#         data_dict = self.cached_data[index]
-
-#         if self.scale == 'dual':
-#             (frac_coords, atom_types, lengths, angles, atom_features, edge_index, edge_attr, bead_features, bead_edge_index, bead_edge_attr, bead_frac_coords, cg_beads, num_atoms) = data_dict['graph_arrays']
-#             data = Data(
-#                 frac_coords=torch.Tensor(frac_coords),
-#                 atom_types=torch.LongTensor(atom_types),
-#                 lengths=torch.Tensor(lengths).view(1, -1),
-#                 angles=torch.Tensor(angles).view(1, -1),
-#                 num_atoms=num_atoms,
-#                 num_nodes=num_atoms,  # special attribute used for batching in pytorch geometric
-#                 atom_features=torch.FloatTensor(atom_features.float()),
-#                 edge_index=torch.LongTensor(edge_index),
-#                 edge_attr=torch.Tensor(edge_attr),
-#                 bead_features=torch.FloatTensor(bead_features.float()),
-#                 bead_edge_index=torch.LongTensor(bead_edge_index),
-#                 bead_edge_attr=torch.Tensor(bead_edge_attr),
-#                 bead_frac_coords=torch.Tensor(bead_frac_coords),
-#                 cg_beads=torch.LongTensor(cg_beads),
-#                 y=torch.Tensor(data_dict[self.prop]).view(1, -1)
-#             )
-#             return data
-
-#         (frac_coords, atom_types, lengths, angles, atom_features, edge_index, edge_attr, num_atoms) = data_dict['graph_arrays']
-
-#         # atom_coords are fractional coordinates
-#         # edge_index is incremented during batching
-#         # https://pytorch-geometric.readthedocs.io/en/latest/notes/batching.html
-#         data = Data(
-#             frac_coords=torch.Tensor(frac_coords),
-#             atom_types=torch.LongTensor(atom_types),
-#             lengths=torch.Tensor(lengths).view(1, -1),
-#             angles=torch.Tensor(angles).view(1, -1),
-#             num_atoms=num_atoms,
-#             num_nodes=num_atoms,  # special attribute used for batching in pytorch geometric
-#             atom_features=torch.FloatTensor(atom_features.float()),
-#             edge_index=torch.LongTensor(edge_index),
-#             edge_attr=torch.Tensor(edge_attr),
-#         )
-#         return data
-
-#     def __repr__(self) -> str:
-#         return f"DatasetPDBFiles({self.path=})"
 
 class CrystDataset(Dataset):
     def __init__(self, name: ValueNode, path: ValueNode,
