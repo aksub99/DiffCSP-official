@@ -152,6 +152,9 @@ class FragmentDecomp:
     def __init__(self, smiles):
         self.fragments_set = set()
         self.smiles = smiles
+        self.mol = Chem.MolFromSmiles(smiles)
+        for i, atom in enumerate(self.mol.GetAtoms()):
+            atom.SetAtomMapNum(i + 1)  # 1-based index stored in the map number
         self.reactant_smarts = "[*&R1:1]!@;-[*&!He&R0,*&R1:2]"
         self.mapper_dict, self.mapper_dict_inverse = self.map_unique_fragments(
             self.smiles
@@ -1770,7 +1773,8 @@ def preprocess_pdbs(input_folder, num_workers, same=False, scale='dual', **kwarg
             shared_crystal,
             pdb_whole_filepath=shared_file_whole,
             smiles=kwargs['smiles'],
-            num_mols=kwargs['num_mols']
+            num_mols=kwargs['num_mols'],
+            scale=scale,
         )
 
         if scale == 'dual':
@@ -1787,6 +1791,7 @@ def preprocess_pdbs(input_folder, num_workers, same=False, scale='dual', **kwarg
             shared_edge_attr_cg = shared_cg_data[3]
             shared_num_atoms_cg = shared_cg_data[4]
             shared_bead_mapping_cg = shared_cg_data[5]
+            import pdb; pdb.set_trace()
         else:
             # Extract shared data components
             shared_atom_types = shared_graph_data[1]
@@ -2150,6 +2155,30 @@ def test_radius_graph_pbc():
     print("Test passed: Both functions return the same results.")
 
 
+def replace_helium_with_wildcard(smiles):
+    """
+    Replaces Helium atoms in a SMILES string with a wildcard (*) to create a SMARTS string.
+
+    Args:
+        smiles (str): Input SMILES string.
+
+    Returns:
+        str: SMARTS string with Helium atoms replaced by wildcard (*).
+    """
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        print(f"Error: Unable to parse SMILES: {smiles}")
+        return None
+
+    # Iterate over atoms and replace Helium atoms (atomic number 2) with a wildcard
+    for atom in mol.GetAtoms():
+        if atom.GetAtomicNum() == 2:  # Helium
+            atom.SetAtomicNum(0)  # Wildcard (*) in RDKit is represented by atomic number 0
+            atom.SetIsotope(0)  # Set isotope to 0 for wildcard
+    
+    # Convert the modified molecule back to a SMARTS string
+    return Chem.MolToSmiles(mol)
+
 def remove_helium_atoms(smiles):
     """
     Removes Helium atoms from a SMILES string.
@@ -2189,7 +2218,8 @@ def get_fragment_atom_mapping_with_smarts(fragments, mol):
     fragment_atom_mapping = {}
 
     # Preprocess fragments to remove Helium atoms and convert to SMARTS
-    processed_fragments = {remove_helium_atoms(frag) for frag in fragments if remove_helium_atoms(frag)}
+    # processed_fragments = {remove_helium_atoms(frag) for frag in fragments if remove_helium_atoms(frag)}
+    processed_fragments = {replace_helium_with_wildcard(frag) for frag in fragments if replace_helium_with_wildcard(frag)}
     print("Processed Fragments (after removing Helium):", processed_fragments)
 
     # Convert fragments (SMARTS strings) to RDKit molecule objects
@@ -2209,6 +2239,7 @@ def get_fragment_atom_mapping_with_smarts(fragments, mol):
             if frag_smarts not in fragment_atom_mapping:
                 fragment_atom_mapping[frag_smarts] = []
             fragment_atom_mapping[frag_smarts].append(atom_indices)
+    import pdb; pdb.set_trace()
     cg_beads = []
     for val in fragment_atom_mapping.values():
         cg_beads += val
