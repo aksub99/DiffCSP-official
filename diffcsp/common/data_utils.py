@@ -789,15 +789,80 @@ def repeat_blocks(
     res = id_ar.cumsum(0)
     return res
 
-def radius_graph_pbc_ovito(pos, lengths, angles, natoms, radius, max_num_neighbors_threshold, device, lattices=None):
-    # Convert all torch tensors to CPU and numpy because OVITO is not compatible with torch tensors
+# def radius_graph_pbc_ovito(pos, lengths, angles, natoms, radius, max_num_neighbors_threshold, device, lattices=None):
+#     # Convert all torch tensors to CPU and numpy because OVITO is not compatible with torch tensors
+#     pos = pos.cpu().numpy()
+#     # lengths = lengths.cpu().numpy()
+#     # angles = angles.cpu().numpy()
+#     natoms = natoms.cpu().numpy()
+#     if lattices is not None:
+#         lattices = lattices.cpu().numpy()
+    
+#     edge_indices = []
+#     unit_cells = []
+#     num_neighbors_per_image = []
+
+#     start_idx = 0
+#     for i in range(len(natoms)):
+#         # Create a new OVITO DataCollection for each structure
+#         data = DataCollection()
+        
+#         if lattices is not None:
+#             cell_matrix = lattices[i]
+#             # Lattices is of shape (3, 3). We need to add a column of zeros to it at the end
+#             cell_matrix = np.hstack([cell_matrix, np.zeros((3, 1))])  # Add zero column for OVITO
+#             data.create_cell(cell_matrix, pbc=(True, True, True))
+#         else:
+#             raise NotImplementedError("lattices is None")
+
+#         # Create particles
+#         particles = data.create_particles(count=natoms[i])
+#         particles.create_property('Position', data=pos[start_idx : start_idx + natoms[i]].tolist())
+
+#         # Use the NearestNeighborFinder to find neighbors within the radius
+#         finder = NearestNeighborFinder(max_num_neighbors_threshold, data)
+#         edge_index_i = []
+#         unit_cell_i = []
+
+#         idx, displacement = finder.find_all()
+#         for a in range(len(idx)):
+#             for b in range(len(idx[a])):
+#                 edge_index_i.append((idx[a][b], a))
+#                 unit_cell_i.append(displacement[a][b])
+        
+#         # Convert results to numpy arrays
+#         lattice_distances = np.linalg.norm(lattices[i], axis=1)
+#         edge_index_i = np.array(edge_index_i).T  # Shape: (2, num_edges)
+#         pos_repeated = np.repeat(pos[start_idx: start_idx + natoms[i]], max_num_neighbors_threshold, axis=0)
+#         unit_cell_i = np.floor_divide(np.array(unit_cell_i) + pos_repeated, lattice_distances)  # Shape: (num_edges, 3)
+#         num_neighbors_image_i = edge_index_i.shape[1]  # Number of neighbors for this image
+
+#         # Store results
+#         edge_indices.append(edge_index_i)
+#         unit_cells.append(unit_cell_i)
+#         num_neighbors_per_image.append(num_neighbors_image_i)
+#         start_idx += natoms[i]
+    
+#     # Convert to PyTorch tensors for consistency with the original function
+#     edge_index = torch.from_numpy(np.hstack(edge_indices)).to(device)  # Combine all edge indices
+#     unit_cell = torch.from_numpy(np.vstack(unit_cells)).to(device)  # Combine all unit cell displacements
+#     num_neighbors_image = torch.tensor(num_neighbors_per_image).to(device)  # Combine all neighbor counts
+
+#     return edge_index, unit_cell, num_neighbors_image
+
+def radius_graph_pbc_ovito(
+    pos, lengths, angles, natoms, radius, max_num_neighbors_threshold, device, lattices=None
+):
+    """
+    pos:         (sum(natoms), 3) positions of all atoms in the batch
+    natoms:      [batch_size], number of atoms in each structure
+    lattices:    (batch_size, 3, 3) or similar
+    """
     pos = pos.cpu().numpy()
-    # lengths = lengths.cpu().numpy()
-    # angles = angles.cpu().numpy()
     natoms = natoms.cpu().numpy()
     if lattices is not None:
         lattices = lattices.cpu().numpy()
-    
+
     edge_indices = []
     unit_cells = []
     num_neighbors_per_image = []
@@ -806,50 +871,76 @@ def radius_graph_pbc_ovito(pos, lengths, angles, natoms, radius, max_num_neighbo
     for i in range(len(natoms)):
         # Create a new OVITO DataCollection for each structure
         data = DataCollection()
-        
+
         if lattices is not None:
-            cell_matrix = lattices[i]
-            # Lattices is of shape (3, 3). We need to add a column of zeros to it at the end
-            cell_matrix = np.hstack([cell_matrix, np.zeros((3, 1))])  # Add zero column for OVITO
-            data.create_cell(cell_matrix, pbc=(True, True, True))
+            cell_matrix = lattices[i]  # shape (3, 3)
+            # OVITO expects a 3x4 matrix (the 4th column is the origin shift)
+            cell_matrix_ovito = np.hstack([cell_matrix, np.zeros((3, 1))])
+            data.create_cell(cell_matrix_ovito, pbc=(True, True, True))
         else:
             raise NotImplementedError("lattices is None")
 
-        # Create particles
+        # Create particles (local indexing 0..natoms[i]-1 for this structure)
         particles = data.create_particles(count=natoms[i])
-        particles.create_property('Position', data=pos[start_idx : start_idx + natoms[i]].tolist())
+        particles.create_property(
+            'Position',
+            data=pos[start_idx : start_idx + natoms[i]].tolist()
+        )
 
         # Use the NearestNeighborFinder to find neighbors within the radius
         finder = NearestNeighborFinder(max_num_neighbors_threshold, data)
+        idx, displacement = finder.find_all()
         edge_index_i = []
         unit_cell_i = []
 
-        idx, displacement = finder.find_all()
+        # idx[a] is a list of neighbor-IDs for atom 'a' (local index)
+        # displacement[a] is the cell offset for each neighbor
         for a in range(len(idx)):
             for b in range(len(idx[a])):
-                edge_index_i.append((idx[a][b], a))
+                # local neighbor index = idx[a][b]
+                # local central atom index = a
+
+                # 1) Convert local indices to global by adding start_idx
+                global_nbr = idx[a][b] + start_idx
+                global_a   = a + start_idx
+
+                edge_index_i.append((global_nbr, global_a))
                 unit_cell_i.append(displacement[a][b])
-        
+
         # Convert results to numpy arrays
+        edge_index_i = np.array(edge_index_i, dtype=np.int64).T  # shape (2, num_edges)
+
+        # Example of computing approximate "unit_cell" displacement.
+        # This snippet is just a placeholder. 
+        # You may need a more correct formula for PBC offsets.
         lattice_distances = np.linalg.norm(lattices[i], axis=1)
-        edge_index_i = np.array(edge_index_i).T  # Shape: (2, num_edges)
-        pos_repeated = np.repeat(pos[start_idx: start_idx + natoms[i]], max_num_neighbors_threshold, axis=0)
-        unit_cell_i = np.floor_divide(np.array(unit_cell_i) + pos_repeated, lattice_distances)  # Shape: (num_edges, 3)
-        num_neighbors_image_i = edge_index_i.shape[1]  # Number of neighbors for this image
+        pos_repeated = np.repeat(
+            pos[start_idx : start_idx + natoms[i]],
+            max_num_neighbors_threshold,
+            axis=0
+        )
+        # "unit_cell_i" is shape (num_edges, 3). 
+        # Below is just some placeholder logic:
+        unit_cell_i = np.floor_divide(np.array(unit_cell_i) + pos_repeated, lattice_distances)
+
+        # Number of neighbors for this image
+        num_neighbors_image_i = edge_index_i.shape[1]
 
         # Store results
         edge_indices.append(edge_index_i)
         unit_cells.append(unit_cell_i)
         num_neighbors_per_image.append(num_neighbors_image_i)
+
+        # Advance offset for next structure
         start_idx += natoms[i]
-    
-    # Convert to PyTorch tensors for consistency with the original function
-    edge_index = torch.from_numpy(np.hstack(edge_indices)).to(device)  # Combine all edge indices
-    unit_cell = torch.from_numpy(np.vstack(unit_cells)).to(device)  # Combine all unit cell displacements
-    num_neighbors_image = torch.tensor(num_neighbors_per_image).to(device)  # Combine all neighbor counts
+
+    # Combine all edge indices into a single tensor
+    edge_index = torch.from_numpy(np.hstack(edge_indices)).to(device)  # shape (2, total_num_edges)
+    unit_cell = torch.from_numpy(np.vstack(unit_cells)).to(device)     # shape (total_num_edges, 3)
+    num_neighbors_image = torch.tensor(num_neighbors_per_image, device=device)
 
     return edge_index, unit_cell, num_neighbors_image
- 
+
 
 def radius_graph_pbc(pos, lengths, angles, natoms, radius, max_num_neighbors_threshold, device, lattices=None):
     # print(f"Before nn search: {torch.cuda.memory_allocated()/10**9} / {torch.cuda.max_memory_allocated()/10**9}")
