@@ -455,12 +455,16 @@ def get_bead_bond_edges(mol, cg_beads):
 
         # Check if the start and end atoms belong to different beads
         if atom_to_bead.get(start) != atom_to_bead.get(end):
-            row += [start, end]
-            col += [end, start]
+            bead_start, bead_end = atom_to_bead.get(start), atom_to_bead.get(end)
+            row += [bead_start, bead_end]
+            col += [bead_end, bead_start]
             edge_attr += [featurize_bond(bond)]
 
     edge_index = torch.tensor([row, col], dtype=torch.long)
     edge_attr = torch.tensor(edge_attr)
+    edge_attr = torch.concat([edge_attr, edge_attr], 0)
+
+    assert edge_index.shape[1] == edge_attr.shape[0]
 
     return edge_index, edge_attr.type(torch.uint8)
 
@@ -540,16 +544,18 @@ def calculate_bead_frac_coords(frac_coords: torch.Tensor, cg_beads: dict, dist_f
     """
     bead_frac_coords = []
 
-    for atom_indices in cg_beads:
-        # Extract fractional coordinates of atoms belonging to this bead
-        atom_coords = frac_coords[atom_indices]  # Shape: (num_atoms_in_bead, 3)
+    try:
+        for atom_indices in cg_beads:
+            # Extract fractional coordinates of atoms belonging to this bead
+            atom_coords = frac_coords[atom_indices]  # Shape: (num_atoms_in_bead, 3)
 
-        mean_coord = torch.tensor(atom_coords)
-        if len(atom_coords.shape) > 1:
-            # Compute Fréchet mean using the distance function
-            mean_coord = frechet_mean(atom_coords, dist_fn)  # Shape: (1, 3)
-        bead_frac_coords.append(mean_coord)
-
+            mean_coord = torch.tensor(atom_coords)
+            if len(atom_coords.shape) > 1:
+                # Compute Fréchet mean using the distance function
+                mean_coord = frechet_mean(atom_coords, dist_fn)  # Shape: (1, 3)
+            bead_frac_coords.append(mean_coord)
+    except:
+        print("cg_beads: ", cg_beads)
     # Stack all bead fractional coordinates into a tensor
     return torch.vstack(bead_frac_coords)
 
@@ -586,19 +592,89 @@ def build_bonded_crystal_graph(crystal, pdb_whole_filepath, smiles, num_mols, sc
     edge_index, edge_attr = get_bond_edges(mol)
 
     assert np.allclose(crystal.lattice.matrix,
-                          lattice_params_to_matrix(*lengths, *angles))
+                       lattice_params_to_matrix(*lengths, *angles))
 
     if scale == 'dual':
+        # Get fragment-based CG beads
         _, cg_beads = get_fragment_atom_mapping_with_smarts(fragments, mol)
         num_beads = len(cg_beads)
+
         bead_features = featurize_beads(mol, cg_beads)
         bead_edge_index, bead_edge_attr = get_bead_bond_edges(mol, cg_beads)
 
         # Calculate bead fractional coordinates using the Fréchet mean
         bead_frac_coords = calculate_bead_frac_coords(frac_coords, cg_beads, dist)
-        return (frac_coords, atom_types, lengths, angles, atom_features, edge_index, edge_attr, num_atoms), (bead_frac_coords, bead_features, bead_edge_index, bead_edge_attr, num_beads, cg_beads)
+
+        # -------------------------
+        # Create atom_types_cg by majority vote among atom_types in each bead
+        # -------------------------
+        atom_types_cg = []
+        for bead_atom_indices in cg_beads:
+            bead_atom_types = atom_types[bead_atom_indices]
+            # Using np.bincount for counting
+            if isinstance(bead_atom_types, np.integer): 
+                majority_type = bead_atom_types
+            else:    
+                majority_type = np.bincount(bead_atom_types).argmax()
+            atom_types_cg.append(majority_type)
+        atom_types_cg = np.array(atom_types_cg)
+        # -------------------------
+
+        # Return everything including atom_types_cg
+        return (
+            (frac_coords, atom_types, lengths, angles, atom_features, edge_index, edge_attr, num_atoms),
+            (bead_frac_coords, atom_types_cg, bead_features, bead_edge_index, bead_edge_attr, num_beads, cg_beads)
+        )
 
     return frac_coords, atom_types, lengths, angles, atom_features, edge_index, edge_attr, num_atoms
+
+
+# def build_bonded_crystal_graph(crystal, pdb_whole_filepath, smiles, num_mols, scale, RemoveHs=False):
+#     frac_coords = crystal.frac_coords
+#     cart_coords = crystal.cart_coords
+#     atom_types = torch.tensor(crystal.atomic_numbers)
+    
+#     if RemoveHs:
+#         heavy_atoms_mask = (atom_types != 1)
+#         frac_coords = frac_coords[heavy_atoms_mask]
+#         cart_coords = cart_coords[heavy_atoms_mask]
+#         atom_types = atom_types[heavy_atoms_mask]
+    
+#     lattice_parameters = crystal.lattice.parameters
+#     lengths = lattice_parameters[:3]
+#     angles = lattice_parameters[3:]
+    
+#     atom_types = np.array(atom_types)
+
+#     lengths, angles = np.array(lengths), np.array(angles)
+#     num_atoms = atom_types.shape[0]
+
+#     if scale == 'dual':
+#         frag_obj = FragmentDecomp(smiles)
+#         fragments = frag_obj.get_fragments()
+
+#     smiles = ".".join([smiles] * num_mols)
+#     # Make rdkit mol from version with molecules made whole at PBC edges
+#     mol = make_rdkit_mol(pdb_whole_filepath, smiles, RemoveHs=RemoveHs)
+
+#     atom_features = featurize_atoms(mol)
+#     # We only get bonded edges here. We will get cutoff-based edges in cspnet
+#     edge_index, edge_attr = get_bond_edges(mol)
+
+#     assert np.allclose(crystal.lattice.matrix,
+#                           lattice_params_to_matrix(*lengths, *angles))
+
+#     if scale == 'dual':
+#         _, cg_beads = get_fragment_atom_mapping_with_smarts(fragments, mol)
+#         num_beads = len(cg_beads)
+#         bead_features = featurize_beads(mol, cg_beads)
+#         bead_edge_index, bead_edge_attr = get_bead_bond_edges(mol, cg_beads)
+
+#         # Calculate bead fractional coordinates using the Fréchet mean
+#         bead_frac_coords = calculate_bead_frac_coords(frac_coords, cg_beads, dist)
+#         return (frac_coords, atom_types, lengths, angles, atom_features, edge_index, edge_attr, num_atoms), (bead_frac_coords, bead_features, bead_edge_index, bead_edge_attr, num_beads, cg_beads)
+
+#     return frac_coords, atom_types, lengths, angles, atom_features, edge_index, edge_attr, num_atoms
 
 def build_crystal(crystal_str, niggli=True, primitive=False):
     """Build crystal from cif string."""
@@ -1775,6 +1851,7 @@ def preprocess_pdbs(input_folder, num_workers, same=False, scale='dual', **kwarg
             smiles=kwargs['smiles'],
             num_mols=kwargs['num_mols'],
             scale=scale,
+            RemoveHs=True,
         )
 
         if scale == 'dual':
@@ -1786,12 +1863,12 @@ def preprocess_pdbs(input_folder, num_workers, same=False, scale='dual', **kwarg
             shared_edge_index_aa = shared_aa_data[5]
             shared_edge_attr_aa = shared_aa_data[6]
             shared_num_atoms_aa = shared_aa_data[7]
-            shared_atom_features_cg = shared_cg_data[1]
-            shared_edge_index_cg = shared_cg_data[2]
-            shared_edge_attr_cg = shared_cg_data[3]
-            shared_num_atoms_cg = shared_cg_data[4]
-            shared_bead_mapping_cg = shared_cg_data[5]
-            import pdb; pdb.set_trace()
+            shared_atom_types_cg = shared_cg_data[1]
+            shared_atom_features_cg = shared_cg_data[2]
+            shared_edge_index_cg = shared_cg_data[3]
+            shared_edge_attr_cg = shared_cg_data[4]
+            shared_num_atoms_cg = shared_cg_data[5]
+            shared_bead_mapping_cg = shared_cg_data[6]
         else:
             # Extract shared data components
             shared_atom_types = shared_graph_data[1]
@@ -1826,7 +1903,7 @@ def preprocess_pdbs(input_folder, num_workers, same=False, scale='dual', **kwarg
                 )
                 graph_arrays_cg = (
                     frac_coords_cg,
-                    shared_atom_types,
+                    shared_atom_types_cg,
                     shared_lengths,
                     shared_angles,
                     shared_atom_features_cg,
@@ -1861,7 +1938,7 @@ def preprocess_pdbs(input_folder, num_workers, same=False, scale='dual', **kwarg
                     ),
                 }
 
-        process_one_shared = partial(process_one_shared, RemoveHs=False)
+        process_one_shared = partial(process_one_shared, RemoveHs=True)
         # Parallelize processing for all files using shared computation
         unordered_results = p_umap(
             process_one_shared,
@@ -1879,7 +1956,8 @@ def preprocess_pdbs(input_folder, num_workers, same=False, scale='dual', **kwarg
                 crystal,
                 pdb_whole_filepath=file_path_whole,
                 smiles=kwargs['smiles'],
-                num_mols=kwargs['num_mols']
+                num_mols=kwargs['num_mols'],
+                RemoveHs=True,
             )
             if scale == 'dual':
                 graph_arrays_aa, graph_arrays_cg = graph_arrays
@@ -1987,20 +2065,44 @@ def preprocess_tensors(crystal_array_list, niggli, primitive, graph_method):
     return ordered_results
 
 
-def add_scaled_lattice_prop(data_list, lattice_scale_method):
-    for dict in data_list:
-        graph_arrays = dict['graph_arrays']
-        # the indexes are brittle if more objects are returned
-        lengths = graph_arrays[2]
-        angles = graph_arrays[3]
-        num_atoms = graph_arrays[-1] # this is -1 in original implementation (we have different order in PDB version)
-        assert lengths.shape[0] == angles.shape[0] == 3
-        assert isinstance(num_atoms, int)
+def add_scaled_lattice_prop(data_list, lattice_scale_method, scale='dual'):
+    if scale == 'dual':
+        for dict in data_list:
+            graph_arrays_aa = dict['graph_arrays_aa']
+            graph_arrays_cg = dict['graph_arrays_cg']
+            # the indexes are brittle if more objects are returned
+            lengths_aa = graph_arrays_aa[2]
+            angles_aa = graph_arrays_aa[3]
+            num_atoms_aa = graph_arrays_aa[-1] # this is -1 in original implementation (we have different order in PDB version)
+            assert lengths_aa.shape[0] == angles_aa.shape[0] == 3
+            assert isinstance(num_atoms_aa, int)
 
-        if lattice_scale_method == 'scale_length':
-            lengths = lengths / float(num_atoms)**(1/3)
+            lengths_cg = graph_arrays_cg[2]
+            angles_cg = graph_arrays_cg[3]
+            num_atoms_cg = graph_arrays_cg[-1] # this is -1 in original implementation (we have different order in PDB version)
+            assert lengths_cg.shape[0] == angles_cg.shape[0] == 3
+            assert isinstance(num_atoms_cg, int)
 
-        dict['scaled_lattice'] = np.concatenate([lengths, angles])
+            if lattice_scale_method == 'scale_length':
+                lengths_aa = lengths_aa / float(num_atoms_aa)**(1/3)
+                lengths_cg = lengths_cg / float(num_atoms_cg)**(1/3)
+
+            dict['scaled_lattice_aa'] = np.concatenate([lengths_aa, angles_aa])
+            dict['scaled_lattice_cg'] = np.concatenate([lengths_cg, angles_cg])
+    else:
+        for dict in data_list:
+            graph_arrays = dict['graph_arrays']
+            # the indexes are brittle if more objects are returned
+            lengths = graph_arrays[2]
+            angles = graph_arrays[3]
+            num_atoms = graph_arrays[-1] # this is -1 in original implementation (we have different order in PDB version)
+            assert lengths.shape[0] == angles.shape[0] == 3
+            assert isinstance(num_atoms, int)
+
+            if lattice_scale_method == 'scale_length':
+                lengths = lengths / float(num_atoms)**(1/3)
+
+            dict['scaled_lattice'] = np.concatenate([lengths, angles])
 
 
 def mard(targets, preds):
@@ -2218,8 +2320,8 @@ def get_fragment_atom_mapping_with_smarts(fragments, mol):
     fragment_atom_mapping = {}
 
     # Preprocess fragments to remove Helium atoms and convert to SMARTS
-    # processed_fragments = {remove_helium_atoms(frag) for frag in fragments if remove_helium_atoms(frag)}
-    processed_fragments = {replace_helium_with_wildcard(frag) for frag in fragments if replace_helium_with_wildcard(frag)}
+    processed_fragments = {remove_helium_atoms(frag) for frag in fragments if remove_helium_atoms(frag)}
+    # processed_fragments = {replace_helium_with_wildcard(frag) for frag in fragments if replace_helium_with_wildcard(frag)}
     print("Processed Fragments (after removing Helium):", processed_fragments)
 
     # Convert fragments (SMARTS strings) to RDKit molecule objects
@@ -2239,7 +2341,6 @@ def get_fragment_atom_mapping_with_smarts(fragments, mol):
             if frag_smarts not in fragment_atom_mapping:
                 fragment_atom_mapping[frag_smarts] = []
             fragment_atom_mapping[frag_smarts].append(atom_indices)
-    import pdb; pdb.set_trace()
     cg_beads = []
     for val in fragment_atom_mapping.values():
         cg_beads += val

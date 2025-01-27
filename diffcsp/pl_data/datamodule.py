@@ -65,9 +65,17 @@ class CrystDataModule(pl.LightningDataModule):
         # Load once to compute property scaler
         if scaler_path is None:
             train_dataset = hydra.utils.instantiate(self.datasets.train)
-            self.lattice_scaler = get_scaler_from_data_list(
-                train_dataset.cached_data,
-                key='scaled_lattice')
+            if self.scale == 'dual':
+                self.lattice_scaler_cg = get_scaler_from_data_list(
+                    train_dataset.cached_data,
+                    key='scaled_lattice_cg')
+                self.lattice_scaler_aa = get_scaler_from_data_list(
+                    train_dataset.cached_data,
+                    key='scaled_lattice_aa')
+            else:
+                self.lattice_scaler = get_scaler_from_data_list(
+                    train_dataset.cached_data,
+                    key='scaled_lattice')
             self.scaler = get_scaler_from_data_list(
                 train_dataset.cached_data,
                 key=train_dataset.prop)
@@ -78,9 +86,17 @@ class CrystDataModule(pl.LightningDataModule):
                 self.scaler = torch.load(Path(scaler_path) / 'prop_scaler.pt')
             except:
                 train_dataset = hydra.utils.instantiate(self.datasets.train)
-                self.lattice_scaler = get_scaler_from_data_list(
-                    train_dataset.cached_data,
-                    key='scaled_lattice')
+                if self.scale == 'dual':
+                    self.lattice_scaler_cg = get_scaler_from_data_list(
+                        train_dataset.cached_data,
+                        key='scaled_lattice_cg')
+                    self.lattice_scaler_aa = get_scaler_from_data_list(
+                        train_dataset.cached_data,
+                        key='scaled_lattice_aa')
+                else:
+                    self.lattice_scaler = get_scaler_from_data_list(
+                        train_dataset.cached_data,
+                        key='scaled_lattice')
                 self.scaler = get_scaler_from_data_list(
                     train_dataset.cached_data,
                     key=train_dataset.prop)
@@ -96,20 +112,35 @@ class CrystDataModule(pl.LightningDataModule):
                 for dataset_cfg in self.datasets.val
             ]
 
-            self.train_dataset.lattice_scaler = self.lattice_scaler
-            self.train_dataset.scaler = self.scaler
-            for val_dataset in self.val_datasets:
-                val_dataset.lattice_scaler = self.lattice_scaler
-                val_dataset.scaler = self.scaler
+            if self.scale == 'dual':
+                self.train_dataset.lattice_scaler_cg = self.lattice_scaler_cg
+                self.train_dataset.lattice_scaler_aa = self.lattice_scaler_aa
+                self.train_dataset.scaler = self.scaler
+                for val_dataset in self.val_datasets:
+                    val_dataset.lattice_scaler_cg = self.lattice_scaler_cg
+                    val_dataset.lattice_scaler_aa = self.lattice_scaler_aa
+                    val_dataset.scaler = self.scaler
+            else:
+                self.train_dataset.lattice_scaler = self.lattice_scaler
+                self.train_dataset.scaler = self.scaler
+                for val_dataset in self.val_datasets:
+                    val_dataset.lattice_scaler = self.lattice_scaler
+                    val_dataset.scaler = self.scaler
 
         if stage is None or stage == "test":
             self.test_datasets = [
                 hydra.utils.instantiate(dataset_cfg)
                 for dataset_cfg in self.datasets.test
             ]
-            for test_dataset in self.test_datasets:
-                test_dataset.lattice_scaler = self.lattice_scaler
-                test_dataset.scaler = self.scaler
+            if self.scale == 'dual':
+                for test_dataset in self.test_datasets:
+                    test_dataset.lattice_scaler_cg = self.lattice_scaler_cg
+                    test_dataset.lattice_scaler_aa = self.lattice_scaler_aa
+                    test_dataset.scaler = self.scaler
+            else:
+                for test_dataset in self.test_datasets:
+                    test_dataset.lattice_scaler = self.lattice_scaler
+                    test_dataset.scaler = self.scaler
 
     def train_dataloader(self, shuffle = True) -> DataLoader:
         return DataLoader(
