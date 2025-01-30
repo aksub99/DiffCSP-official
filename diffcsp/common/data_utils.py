@@ -509,7 +509,7 @@ def frechet_mean(frac_coords: torch.Tensor, dist_fn, tol=1e-6, max_iter=100) -> 
     # mu = torch.mean(frac_coords, dim=0, keepdim=True).clone().detach()
     # mu.requires_grad = True
 
-    optimizer = torch.optim.SGD([mu], lr=0.1)
+    optimizer = torch.optim.SGD([mu], lr=3e-2)
 
     for _ in range(max_iter):
         optimizer.zero_grad()
