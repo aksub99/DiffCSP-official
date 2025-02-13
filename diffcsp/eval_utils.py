@@ -156,7 +156,7 @@ def get_crystals_list(
         cur_atom_types = atom_types.narrow(0, start_idx, num_atom)
         cur_lengths = lengths[batch_idx]
         cur_angles = angles[batch_idx]
-        cur_bonds = gt_bonds[batch_idx].edge_index if gt_bonds is not None else None
+        cur_bonds = gt_bonds[batch_idx].edge_index_aa if gt_bonds is not None else None
 
         crystal_array_list.append({
             'frac_coords': cur_frac_coords.detach().cpu().numpy(),
