@@ -5,6 +5,9 @@ import torch
 import copy
 import os
 import itertools
+import json
+import math
+from collections import deque
 
 from rdkit import Chem
 from rdkit.Chem import AllChem
@@ -125,11 +128,9 @@ atom_features_list = {
         "CHI_OTHER",
     ],
     "degree": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, "misc"],
-    "numring": [0, 1, 2, 3, 4, 5, 6, "misc"],
     "numring": [0, 1, 2, "misc"],
     "implicit_valence": [0, 1, 2, 3, 4, 5, 6, "misc"],
     "formal_charge": [-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, "misc"],
-    "numH": [0, 1, 2, 3, 4, 5, 6, 7, 8, "misc"],
     "numH": [0, 1, 2, 3, 4, "misc"],
     "number_radical_e": [0, 1, 2, 3, 4, "misc"],
     "hybridization": ["SP", "SP2", "SP3", "SP3D", "SP3D2", "misc"],
@@ -208,6 +209,225 @@ class PDBParser:
         """Return lattice parameters and angles if present."""
         return self.lattice
 
+def load_crystals_from_json(json_file):
+    """Load a list of crystal entries from a JSON file."""
+    with open(json_file, 'r') as f:
+        data = json.load(f)
+    # data is expected to be a list of entries or a dict with multiple entries
+    # Adjust accordingly if your JSON structure is different
+    if isinstance(data, dict):
+        # Maybe your file has a single entry or a top-level dict containing "entries"
+        # Adjust as needed
+        data = [data]
+    return data
+
+
+def lattice_matrix(a, b, c, alpha, beta, gamma):
+    """
+    Construct a 3x3 lattice matrix from lengths (a,b,c) and angles (alpha,beta,gamma in degrees).
+    The columns of the returned matrix correspond to the lattice vectors in Cartesian space.
+    """
+    alpha_r = math.radians(alpha)
+    beta_r  = math.radians(beta)
+    gamma_r = math.radians(gamma)
+
+    # Using standard crystallographic formulas for the lattice vectors:
+    # Ref: https://en.wikipedia.org/wiki/Fractional_coordinates
+    v1 = [a, 0.0, 0.0]
+    v2 = [b*math.cos(gamma_r), b*math.sin(gamma_r), 0.0]
+    cx = c*math.cos(beta_r)
+    cy = c*(math.cos(alpha_r) - math.cos(beta_r)*math.cos(gamma_r))/math.sin(gamma_r)
+    cz = c*math.sqrt(
+        1
+        - math.cos(alpha_r)**2
+        - math.cos(beta_r)**2
+        - math.cos(gamma_r)**2
+        + 2*math.cos(alpha_r)*math.cos(beta_r)*math.cos(gamma_r)
+    )
+    v3 = [cx, cy, cz]
+    return np.array([v1, v2, v3]).T  # shape (3,3), columns are v1,v2,v3
+
+
+def find_connected_components(num_atoms, bonds):
+    """
+    Given the number of atoms and a list of bonds (each with 'atom1_idx', 'atom2_idx'),
+    return a list of connected components. Each component is a list of atom indices.
+    """
+    adjacency = [[] for _ in range(num_atoms)]
+    for b in bonds:
+        i = b["atom1_idx"]
+        j = b["atom2_idx"]
+        adjacency[i].append(j)
+        adjacency[j].append(i)
+
+    visited = [False] * num_atoms
+    components = []
+
+    for start_atom in range(num_atoms):
+        if not visited[start_atom]:
+            # BFS (or DFS) to get all atoms in this connected component
+            queue = deque([start_atom])
+            visited[start_atom] = True
+            component = [start_atom]
+            while queue:
+                current = queue.popleft()
+                for neigh in adjacency[current]:
+                    if not visited[neigh]:
+                        visited[neigh] = True
+                        queue.append(neigh)
+                        component.append(neigh)
+            components.append(component)
+
+    return components
+
+
+def best_image_shift(base_frac, trial_frac):
+    """
+    For a pair of fractional coordinates base_frac and trial_frac (shape (3,)),
+    find the integer shift in { -1, 0, 1 }^3 that brings them closest in Cartesian space.
+
+    Returns: shift (3,) integer array, such that:
+        fractional_coordinate_of_neighbor = trial_frac + shift
+    """
+    # We want the shift that minimizes the distance in fractional space.
+    # If we also have the lattice matrix, we might do a more exact approach
+    # in cart space. But a simpler approximation is to pick the shift that
+    # puts each fractional dimension difference in (-0.5, 0.5].
+    # For a truly correct approach in real space, you'd pass the lattice matrix
+    # and compare actual Cartesian distances. 
+    # Here, we do the simpler fractional approach for clarity.
+
+    shift_candidate = np.array([0, 0, 0], dtype=int)
+    delta = trial_frac - base_frac
+    # Put each dimension into (-0.5, 0.5]
+    for dim in range(3):
+        # round the delta to nearest integer
+        # e.g. if delta[dim] = 0.6 => shift = -1 so that new delta = -0.4
+        # if delta[dim] = -0.7 => shift = 1 so that new delta = 0.3
+        shift_candidate[dim] = -int(round(delta[dim]))
+    return shift_candidate
+
+
+def make_molecules_whole(frac_coords, bonds):
+    """
+    Unwrap molecules so that each connected component is contiguous in fractional space.
+    frac_coords: (N,3) array of the original fractional coords
+    bonds: list of dictionaries with keys "atom1_idx", "atom2_idx"
+
+    Returns: new_frac_coords: (N,3) array of 'unwrapped' fractional coordinates
+    """
+    num_atoms = len(frac_coords)
+    new_frac = np.zeros_like(frac_coords)
+    visited = [False]*num_atoms
+
+    # Build adjacency
+    adjacency = [[] for _ in range(num_atoms)]
+    for b in bonds:
+        i = b["atom1_idx"]
+        j = b["atom2_idx"]
+        adjacency[i].append(j)
+        adjacency[j].append(i)
+
+    # Find connected components
+    components = find_connected_components(num_atoms, bonds)
+
+    # BFS/DFS in each component to "unwrap"
+    for comp in components:
+        # Pick an anchor: the first atom in this component
+        anchor = comp[0]
+        new_frac[anchor] = frac_coords[anchor]
+        visited[anchor] = True
+
+        queue = deque([anchor])
+
+        while queue:
+            current = queue.popleft()
+            base_pos = new_frac[current]
+
+            for neigh in adjacency[current]:
+                if not visited[neigh]:
+                    original_pos = frac_coords[neigh]
+                    shift = best_image_shift(base_pos, original_pos)
+                    new_frac[neigh] = original_pos + shift
+                    visited[neigh] = True
+                    queue.append(neigh)
+
+    return new_frac
+
+
+def process_crystal(entry):
+    """
+    Given one crystal entry (with keys "cell", "atoms", "bonds"), unwrap the molecules.
+    Returns the unwrapped fractional coordinates.
+    """
+    # 1) Lattice
+    cell = entry["cell"]
+    a = cell["a"]
+    b = cell["b"]
+    c = cell["c"]
+    alpha = cell["alpha"]
+    beta  = cell["beta"]
+    gamma = cell["gamma"]
+
+    # Optionally build the lattice matrix (3x3) if you want
+    latt = lattice_matrix(a, b, c, alpha, beta, gamma)
+
+    # 2) Fractional coords array
+    atoms = entry["atoms"]
+    frac_coords = np.array([[atom["fract_x"], atom["fract_y"], atom["fract_z"]]
+                            for atom in atoms], dtype=float)
+
+    # 3) Bond data
+    bonds = entry["bonds"]  # list of { atom1_idx, atom2_idx, ... }
+
+    # 4) "Make molecules whole" in fractional space
+    unwrapped_frac = make_molecules_whole(frac_coords, bonds)
+
+    # If you want them in Cartesian, do:
+    cart_coords = unwrapped_frac.dot(latt)
+
+    return cart_coords
+
+def build_crystal_from_dict(entry):
+    """
+    Given a dictionary entry with keys "cell", "atoms", "bonds", build a pymatgen Structure.
+    Returns: pymatgen Structure object
+    """
+    # 1) Lattice
+    cell = entry["cell"]
+    a = cell["a"]
+    b = cell["b"]
+    c = cell["c"]
+    alpha = cell["alpha"]
+    beta  = cell["beta"]
+    gamma = cell["gamma"]
+
+    # Optionally build the lattice matrix (3x3) if you want
+    latt = lattice_matrix(a, b, c, alpha, beta, gamma)
+
+    # 2) Fractional coords array
+    atoms = entry["atoms"]
+    frac_coords = np.array([[atom["fract_x"], atom["fract_y"], atom["fract_z"]]
+                            for atom in atoms], dtype=float)
+
+    # # 3) Bond data
+    # bonds = entry["bonds"]  # list of { atom1_idx, atom2_idx, ... }
+
+    # # 4) "Make molecules whole" in fractional space
+    # unwrapped_frac = make_molecules_whole(frac_coords, bonds)
+
+    # 5) Build pymatgen structure
+    species = [atom['element'] for atom in atoms]
+    
+    crystal = Structure(
+        lattice=Lattice.from_parameters(a, b, c, alpha, beta, gamma),
+        species=species,
+        coords=frac_coords,
+        coords_are_cartesian=False,
+    )
+    
+    return crystal
+
 def build_crystal_from_pdb(pdb_filepath):
     parser = PDBParser(pdb_filepath)
     atom_coords = parser.get_atom_coordinates()
@@ -228,6 +448,132 @@ def build_crystal_from_pdb(pdb_filepath):
 CrystalNN = local_env.CrystalNN(
     distance_cutoffs=None, x_diff_weight=-1, porous_adjustment=False)
 
+
+def make_rdkit_mol_from_dict(datapoint, smiles, RemoveHs=True):
+    """
+    Build an RDKit molecule from a 'datapoint' dictionary (with atoms, bonds,
+    and unwrapped Cartesian coordinates) while optionally skipping H atoms
+    (similar to `MolFromPDBFile(..., removeHs=True)` behavior).
+
+    Args:
+      datapoint: a dict with keys:
+        - "atoms": list of atoms, each with "element" and "cart_x_unwrapped",
+          "cart_y_unwrapped", "cart_z_unwrapped"
+        - "bonds": list of dicts, each with "atom1_idx", "atom2_idx"
+      smiles: a SMILES string to use as a template for bond orders
+      RemoveHs: if True, do not include any hydrogen atoms from the JSON data
+        in the final RDKit molecule. If False, include them.
+
+    Returns:
+      An RDKit Mol (with a single conformer) whose bond orders have been
+      assigned from the SMILES template.
+    """
+    mol = Chem.RWMol()
+
+    # A map from old atom indices (in datapoint) to new indices (in this RWMol)
+    old_to_new = {}
+    new_idx = 0
+
+    # 1) Add atoms (skip H if RemoveHs == True)
+    for i, atom in enumerate(datapoint["atoms"]):
+        element = atom["element"]
+        if RemoveHs and element == "H":
+            # Skip hydrogen atom entirely
+            continue
+
+        atomic_num = Chem.GetPeriodicTable().GetAtomicNumber(element)
+        mol.AddAtom(Chem.Atom(atomic_num))
+        old_to_new[i] = new_idx
+        new_idx += 1
+
+    # 2) Create a conformer for these atoms
+    conformer = Chem.Conformer(mol.GetNumAtoms())
+    mol.AddConformer(conformer, assignId=True)  # Conformer ID=0
+
+    # 3) Set coordinates for the non-skipped atoms
+    for i, atom in enumerate(datapoint["atoms"]):
+        element = atom["element"]
+        if RemoveHs and element == "H":
+            continue  # We never added this atom, so skip
+
+        x = atom["cart_x_unwrapped"]
+        y = atom["cart_y_unwrapped"]
+        z = atom["cart_z_unwrapped"]
+        new_i = old_to_new[i]
+
+        mol.GetConformer(0).SetAtomPosition(new_i, (x, y, z))
+
+    # 4) Add bonds (again, skip bonds to H if `RemoveHs=True`)
+    for bond in datapoint["bonds"]:
+        a1 = bond["atom1_idx"]
+        a2 = bond["atom2_idx"]
+
+        # If either atom is H and we're removing H, skip that bond
+        if RemoveHs:
+            if (datapoint["atoms"][a1]["element"] == "H" or
+                datapoint["atoms"][a2]["element"] == "H"):
+                continue
+
+        # Map old indices to new
+        new_a1 = old_to_new[a1]
+        new_a2 = old_to_new[a2]
+        # For now, add them as single
+        mol.AddBond(new_a1, new_a2, Chem.rdchem.BondType.SINGLE)
+
+    # 5) Assign bond orders from the SMILES template
+    template = Chem.MolFromSmiles(smiles)
+    mol = AllChem.AssignBondOrdersFromTemplate(template, mol)
+
+    # 6) Optionally remove hydrogens from the final molecule
+    #    (If RemoveHs=True, we've already skipped them, so this is redundant.
+    #     But if you ever want to force removal of leftover H, you could do it here.)
+    if RemoveHs:
+        mol = Chem.RemoveHs(mol)
+    # Convert RWMol to Mol
+    return mol
+
+
+# def make_rdkit_mol_from_dict(datapoint, smiles, RemoveHs=False):
+#     # Initialize empty rdkit mol
+#     mol = Chem.RWMol()
+
+#     # 1. First, add all atoms
+#     for i, atom in enumerate(datapoint["atoms"]):
+#         atom_type = atom["element"]
+#         # 'chemical_symbols.index(atom_type)' might be off if your list
+#         # doesn’t match RDKit’s atomic numbers. Alternatively:
+#         atomic_num = Chem.GetPeriodicTable().GetAtomicNumber(atom_type)
+#         mol.AddAtom(Chem.Atom(atomic_num))
+    
+#     # 2. Create a conformer for the new molecule
+#     conformer = Chem.Conformer(mol.GetNumAtoms())
+#     mol.AddConformer(conformer, assignId=True)  # This adds a conformer with ID=0
+    
+#     # ctr = 0
+#     # 3. Now we can safely set 3D coordinates
+#     for i, atom in enumerate(datapoint["atoms"]):
+#         x = atom["cart_x_unwrapped"]
+#         y = atom["cart_y_unwrapped"]
+#         z = atom["cart_z_unwrapped"]
+#         mol.GetConformer(0).SetAtomPosition(i, (x, y, z))
+#     # print(ctr)
+    
+#     # 4. Add bonds
+#     for bond in datapoint["bonds"]:
+#         atom1_idx = bond["atom1_idx"]
+#         atom2_idx = bond["atom2_idx"]
+#         bond_type = Chem.rdchem.BondType.SINGLE
+#         mol.AddBond(atom1_idx, atom2_idx, bond_type)
+    
+#     # 5. Assign bond orders from smiles template
+#     template = Chem.MolFromSmiles(smiles)
+#     mol = AllChem.AssignBondOrdersFromTemplate(template, mol)
+
+#     # 6. Optionally remove hydrogens
+#     if RemoveHs:
+#         mol = Chem.RemoveHs(mol)
+
+#     return mol
 
 def make_rdkit_mol(pdb_filepath, smiles, RemoveHs=False):
     raw_mol = Chem.MolFromPDBFile(pdb_filepath, removeHs=RemoveHs)
@@ -269,9 +615,9 @@ def featurize_atoms(mol):
 def safe_index(l, e):
     """Return index of element e in list l. If e is not present, return the last index"""
     try:
-        return l.index(e)
+        return l.index(e) + 1
     except:
-        return len(l) - 1
+        return len(l)
 
 
 def featurize_bond(bond):
@@ -295,6 +641,42 @@ def get_bond_edges(mol):
     edge_attr = torch.concat([edge_attr, edge_attr], 0)
     return edge_index, edge_attr.type(torch.uint8)
 
+
+def build_bonded_crystal_graph_from_dict(crystal, datapoint, smiles, RemoveHs=False):
+    frac_coords = crystal.frac_coords
+    cart_coords = crystal.cart_coords
+    atom_types = torch.tensor(crystal.atomic_numbers)
+    
+    if RemoveHs:
+        heavy_atoms_mask = (atom_types != 1)
+        frac_coords = frac_coords[heavy_atoms_mask]
+        cart_coords = cart_coords[heavy_atoms_mask]
+        atom_types = atom_types[heavy_atoms_mask]
+    
+    lattice_parameters = crystal.lattice.parameters
+    lengths = lattice_parameters[:3]
+    angles = lattice_parameters[3:]
+    
+    atom_types = np.array(atom_types)
+
+    lengths, angles = np.array(lengths), np.array(angles)
+    num_atoms = atom_types.shape[0]
+
+    # smiles = ".".join([smiles] * num_mols)
+    # Make rdkit mol from version with molecules made whole at PBC edges
+    try:
+        mol = make_rdkit_mol_from_dict(datapoint, smiles, RemoveHs=RemoveHs)
+    except:
+        return None
+
+    atom_features = featurize_atoms(mol)
+    # We only get bonded edges here. We will get cutoff-based edges in cspnet
+    edge_index, edge_attr = get_bond_edges(mol)
+
+    assert np.allclose(crystal.lattice.matrix,
+                          lattice_params_to_matrix(*lengths, *angles))
+
+    return frac_coords, atom_types, lengths, angles, atom_features, edge_index, edge_attr, num_atoms
 
 def build_bonded_crystal_graph(crystal, pdb_whole_filepath, smiles, num_mols, RemoveHs=False):
     frac_coords = crystal.frac_coords
@@ -1544,35 +1926,78 @@ def get_scaler_from_data_list(data_list, key):
     scaler.fit(targets)
     return scaler
 
-# def process_one_pdb(filename, input_folder, input_folder_whole, **kwargs):
-#     file_path = os.path.join(input_folder, filename)
-#     file_path_whole = os.path.join(input_folder_whole, filename)
-#     crystal = build_crystal_from_pdb(file_path)
+def preprocess_json(input_file, num_workers, **kwargs):
+    """
+    Preprocess JSON file and build graph data.
+    """
+    data = load_crystals_from_json(input_file)
 
-#     # Rdkit molecule objects are made with pdb version where molecules are made whole at pbc boundaries
-#     # TODO: Modify later to directly use mdtraj to do unwrapping
-#     graph_arrays = build_bonded_crystal_graph(crystal, pdb_whole_filepath=file_path_whole, smiles=kwargs['smiles'], num_mols=kwargs['num_mols'])
-#     result_dict = {
-#         'frame_id': int(file_path.split('.')[0][-1]),
-#         'file_path': file_path,
-#         'graph_arrays': graph_arrays,
-#     }
-#     return result_dict
+    for datapoint in data:
+        refcode = datapoint["refcode"]
+        unwrapped_cart = process_crystal(datapoint)
+        # for idx in range(min(5, len(unwrapped_cart))):
+        #     print(f"Atom {idx} unwrapped cart = {unwrapped_cart[idx]}")
 
-# def preprocess_pdbs(input_folder, num_workers, **kwargs):
-#     # Make sure to name folder containing whole versions with _whole at the end
-#     process_func = partial(process_one_pdb, input_folder=input_folder, input_folder_whole=input_folder.replace('not_whole', 'whole'), **kwargs)
-#     unordered_results = [process_func(file) for file in os.listdir(input_folder)]
-    
-#     # # process_func(os.listdir(input_folder)[0])
-#     # unordered_results = p_umap(
-#     #     process_func,
-#     #     [file for file in os.listdir(input_folder)],
-#     #     num_cpus=num_workers)
+        # If you want to store them back in the JSON structure, you can do so:
+        for idx, atom in enumerate(datapoint["atoms"]):
+            atom["cart_x_unwrapped"] = unwrapped_cart[idx, 0]
+            atom["cart_y_unwrapped"] = unwrapped_cart[idx, 1]
+            atom["cart_z_unwrapped"] = unwrapped_cart[idx, 2]
 
-#     frameid_to_results = {result['frame_id']: result for result in unordered_results}
-#     ordered_results = [frameid_to_results[int(file.split('.')[0][-1])] for file in os.listdir(input_folder)]
-#     return ordered_results
+    # input_folder_whole = input_folder.replace('not_whole', 'whole')
+
+    # Process each PDB file independently
+    def process_one(datapoint):
+        # file_path = os.path.join(input_folder, filename)
+        # file_path_whole = os.path.join(input_folder_whole, filename)
+        crystal = build_crystal_from_dict(datapoint)
+        graph_arrays = build_bonded_crystal_graph_from_dict(
+            crystal,
+            datapoint,
+            smiles=datapoint['smiles'],
+            RemoveHs=True,
+        )
+        return {
+            'refcode': datapoint['refcode'],
+            'graph_arrays': graph_arrays,
+        }
+
+    # Parallelize processing for all files
+    # unordered_results = process_one(data[0])
+    unordered_results = p_umap(
+        process_one,
+        [entry for entry in data],
+        num_cpus=num_workers
+    )
+
+    # Order results by frame_id
+    refcode_to_results = {result['refcode']: result for result in unordered_results}
+    ordered_results = [
+        refcode_to_results[d['refcode']]
+        for d in data
+    ]
+    ordered_results = [result for result in ordered_results if result['graph_arrays'] is not None]
+    return ordered_results
+
+def process_one(row, niggli, primitive, graph_method, prop_list, use_space_group = False, tol=0.01):
+    crystal_str = row['cif']
+    crystal = build_crystal(
+        crystal_str, niggli=niggli, primitive=primitive)
+    result_dict = {}
+    if use_space_group:
+        crystal, sym_info = get_symmetry_info(crystal, tol = tol)
+        result_dict.update(sym_info)
+    else:
+        result_dict['spacegroup'] = 1
+    graph_arrays = build_crystal_graph(crystal, graph_method)
+    properties = {k: row[k] for k in prop_list if k in row.keys()}
+    result_dict.update({
+        'mp_id': row['material_id'],
+        'cif': crystal_str,
+        'graph_arrays': graph_arrays
+    })
+    result_dict.update(properties)
+    return result_dict
 
 def preprocess_pdbs(input_folder, num_workers, same=False, **kwargs):
     """

@@ -11,7 +11,50 @@ import numpy as np
 
 from diffcsp.common.utils import PROJECT_ROOT
 from diffcsp.common.data_utils import (
-    preprocess, preprocess_tensors, preprocess_pdbs, add_scaled_lattice_prop)
+    preprocess, preprocess_tensors, preprocess_pdbs, preprocess_json, add_scaled_lattice_prop)
+
+class DatasetJSONFile(Dataset):
+    def __init__(self, name: ValueNode, json_path: ValueNode, prop: ValueNode, preprocess_workers: ValueNode, lattice_scale_method: ValueNode, save_path: ValueNode, **kwargs):
+        super().__init__()
+        self.json_path = json_path
+        self.prop = prop
+        self.preprocess_json(save_path, preprocess_workers, **kwargs)
+        add_scaled_lattice_prop(self.cached_data, lattice_scale_method)
+
+    def preprocess_json(self, save_path, preprocess_workers, **kwargs):
+        if os.path.exists(save_path):
+            self.cached_data = torch.load(save_path)
+        else:
+            cached_data = preprocess_json(self.json_path, preprocess_workers)
+            torch.save(cached_data, save_path)
+            self.cached_data = cached_data
+
+    def __len__(self) -> int:
+        return len(self.cached_data)
+
+    def __getitem__(self, index):
+        data_dict = self.cached_data[index]
+
+        (frac_coords, atom_types, lengths, angles, atom_features, edge_index, edge_attr, num_atoms) = data_dict['graph_arrays']
+
+        # atom_coords are fractional coordinates
+        # edge_index is incremented during batching
+        # https://pytorch-geometric.readthedocs.io/en/latest/notes/batching.html
+        data = Data(
+            frac_coords=torch.Tensor(frac_coords),
+            atom_types=torch.LongTensor(atom_types),
+            lengths=torch.Tensor(lengths).view(1, -1),
+            angles=torch.Tensor(angles).view(1, -1),
+            num_atoms=num_atoms,
+            num_nodes=num_atoms,  # special attribute used for batching in pytorch geometric
+            atom_features=torch.FloatTensor(atom_features.float()),
+            edge_index=torch.LongTensor(edge_index),
+            edge_attr=torch.Tensor(edge_attr),
+        )
+        return data
+
+    def __repr__(self) -> str:
+        return f"DatasetPDBFiles({self.path=})"
 
 class DatasetPDBFiles(Dataset):
     def __init__(self, name: ValueNode, folder_path: ValueNode, prop: ValueNode, preprocess_workers: ValueNode, lattice_scale_method: ValueNode, save_path: ValueNode, **kwargs):
